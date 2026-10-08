@@ -69,6 +69,7 @@ data class ConnectionSecrets(
     val passphrase: String = "",
 )
 
+@Serializable
 data class RemoteThread(
     val id: String,
     val title: String,
@@ -240,6 +241,7 @@ data class RemoteDeviceLogin(
     val userCode: String,
 )
 
+@Serializable
 data class RemoteThreadSession(
     val timeline: List<TimelineItem>,
     val model: String?,
@@ -340,6 +342,7 @@ enum class TimelineKind {
     ERROR,
 }
 
+@Serializable
 data class TimelineItem(
     val id: String,
     val kind: TimelineKind,
@@ -351,6 +354,7 @@ data class TimelineItem(
     val isGoal: Boolean = false,
 )
 
+@Serializable
 data class FileChangeSummary(
     val path: String,
     val kind: String,
@@ -444,6 +448,7 @@ data class AppUiState(
     val editingConnection: SavedConnection? = null,
     val isBusy: Boolean = false,
     val notice: String? = null,
+    val isReadOnlyThread: Boolean = false,
 )
 
 internal fun AppUiState.withThreadRenamed(threadId: String, name: String): AppUiState {

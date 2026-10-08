@@ -6,6 +6,9 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Typography
+import androidx.compose.material3.Shapes
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
@@ -21,9 +24,9 @@ val CodexRed = Color(0xFFB93A32)
 val DiffGreen = Color(0xFFE5F4EA)
 val DiffRed = Color(0xFFFBE8E7)
 val Ink = Color(0xFF171716)
-val WarmBackground = Color(0xFFF7F7F5)
-val Panel = Color(0xFFF0F0ED)
-val Stroke = Color(0xFFD9D9D4)
+val WarmBackground = Color(0xFFFFFFFF)
+val Panel = Color(0xFFF2F2F2)
+val Stroke = Color(0xFFDDDDDD)
 
 private val LightColors = lightColorScheme(
     primary = Ink,
@@ -32,10 +35,16 @@ private val LightColors = lightColorScheme(
     onPrimaryContainer = Ink,
     secondary = CodexGreen,
     onSecondary = Color.White,
+    secondaryContainer = Color(0xFFE6E6E6),
+    onSecondaryContainer = Ink,
     error = CodexRed,
     background = WarmBackground,
     onBackground = Ink,
     surface = Color(0xFFFCFCFA),
+    surfaceTint = Color.Transparent,
+    surfaceContainer = Color(0xFFF5F5F5),
+    surfaceContainerHigh = Color(0xFFECECEC),
+    surfaceContainerHighest = Color(0xFFE5E5E5),
     onSurface = Ink,
     surfaceVariant = Panel,
     onSurfaceVariant = Color(0xFF565650),
@@ -49,10 +58,16 @@ private val DarkColors = darkColorScheme(
     onPrimaryContainer = Color(0xFFF1F1ED),
     secondary = Color(0xFF67C99B),
     onSecondary = Color(0xFF072A1C),
+    secondaryContainer = Color(0xFF353535),
+    onSecondaryContainer = Color(0xFFF1F1ED),
     error = Color(0xFFFFB4AC),
-    background = Color(0xFF181817),
+    background = Color.Black,
     onBackground = Color(0xFFF0F0EC),
-    surface = Color(0xFF20201E),
+    surface = Color(0xFF151515),
+    surfaceTint = Color.Transparent,
+    surfaceContainer = Color(0xFF191919),
+    surfaceContainerHigh = Color(0xFF242424),
+    surfaceContainerHighest = Color(0xFF303030),
     onSurface = Color(0xFFF0F0EC),
     surfaceVariant = Color(0xFF2A2A27),
     onSurfaceVariant = Color(0xFFB9B9B1),
@@ -94,5 +109,7 @@ fun CodexRemoteTheme(
             }
         }
     }
-    MaterialTheme(colorScheme = colors, typography = CodexTypography, content = content)
+    MaterialTheme(colorScheme = colors, typography = CodexTypography,
+        shapes = Shapes(extraSmall = RoundedCornerShape(12.dp), small = RoundedCornerShape(16.dp),
+            medium = RoundedCornerShape(24.dp), large = RoundedCornerShape(28.dp), extraLarge = RoundedCornerShape(32.dp)), content = content)
 }

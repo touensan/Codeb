@@ -1,5 +1,8 @@
 package com.codex.remote
 
+import com.codex.remote.R
+import com.codex.remote.ui.uiText
+
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -8,6 +11,7 @@ import com.codex.remote.data.rpc.CodexRpcClient
 import com.codex.remote.data.ssh.SshAppServerTransportFactory
 import com.codex.remote.data.ssh.UnknownHostKeyException
 import com.codex.remote.data.store.ConnectionStore
+import com.codex.remote.data.store.LocalStore
 import com.codex.remote.domain.AppUiState
 import com.codex.remote.domain.ApprovalKind
 import com.codex.remote.domain.ConnectionDraft
@@ -43,10 +47,18 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import java.util.UUID
 
-class AppViewModel(application: Application) : AndroidViewModel(application) {
+class AppViewModel(application: Application, private val managerOnly: Boolean = false, private val autoRestore: Boolean = true) : AndroidViewModel(application) {
     private val store = ConnectionStore(application)
+    private val cache = LocalStore(application)
     private val transportFactory = SshAppServerTransportFactory(application)
     private val _state = MutableStateFlow(AppUiState())
     val state: StateFlow<AppUiState> = _state.asStateFlow()
@@ -54,12 +66,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var rpc: CodexRpcClient? = null
     private var eventJob: Job? = null
     private var didRestoreLastConnection = false
+    private var connectJob: Job? = null
+    private var readOnlyJob: Job? = null
+    private var selectThreadJob: Job? = null
 
     init {
         viewModelScope.launch {
             store.connections.collect { connections ->
                 val sortedConnections = connections.sortedByDescending { it.lastUsedAt }
-                val connectionToRestore = if (!didRestoreLastConnection) {
+                val connectionToRestore = if (autoRestore && !didRestoreLastConnection) {
                     didRestoreLastConnection = true
                     sortedConnections.lastUsedConnectionOrNull()
                 } else {
@@ -75,7 +90,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         activeConnection = restoreConnection ?: refreshedActive,
                         connectionStatus = if (restoreConnection != null) ConnectionStatus.CONNECTING else current.connectionStatus,
                         connectionMessage = if (restoreConnection != null) {
-                            "正在连接 ${restoreConnection.host}…"
+                            uiText(R.string.connecting_host, "正在连接 %1\$s…", restoreConnection.host)
                         } else {
                             current.connectionMessage
                         },
@@ -84,6 +99,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 restoreConnection?.let(::connect)
             }
+        }
+        if (!managerOnly) viewModelScope.launch {
+            _state.map { state -> state.copy(notice = null, showConnections = false, showConnectionEditor = false) }
+                .distinctUntilChanged().collect { snapshot ->
+                    if (snapshot.activeConnection != null && (snapshot.threads.isNotEmpty() || snapshot.selectedThreadId != null)) {
+                        val generation = cache.cacheGeneration
+                        runCatching { withContext(Dispatchers.IO) { cache.saveRemote(snapshot, generation) } }
+                            .onFailure { _state.update { it.copy(notice = uiText(R.string.ui_295, "Local storage failed. Existing files were kept.")) } }
+                    }
+                }
         }
     }
 
@@ -124,31 +149,47 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect(connection: SavedConnection) {
-        viewModelScope.launch {
+        com.codex.remote.data.diagnostics.DebugApi.record("remote_connect")
+        if (managerOnly) {
+            _state.update { it.copy(activeConnection = connection, showConnections = false,
+                connectionMessage = (if (it.activeConnection?.id == connection.id) "reconnect-" else "select-") + UUID.randomUUID()) }
+            viewModelScope.launch { store.recordUsed(connection.id) }
+            return
+        }
+        runCatching { androidx.core.content.ContextCompat.startForegroundService(getApplication(), android.content.Intent(getApplication(), SessionService::class.java)) }
+            .onFailure { com.codex.remote.data.diagnostics.DebugApi.record("foreground_service_error", it) }
+        connectJob?.cancel()
+        selectThreadJob?.cancel()
+        readOnlyJob?.cancel()
+        connectJob = viewModelScope.launch {
+            val cachedIndex = runCatching { withContext(Dispatchers.IO) { cache.index(connection.id) } }.getOrNull()
+            val cachedSession = cachedIndex?.selectedThreadId?.let { id ->
+                runCatching { withContext(Dispatchers.IO) { cache.session(connection.id, id) } }.getOrNull()
+            }
             disconnectInternal(clearActive = false)
             _state.update {
                 it.copy(
                     activeConnection = connection,
                     connectionStatus = ConnectionStatus.CONNECTING,
-                    connectionMessage = "正在连接 ${connection.host}…",
+                    connectionMessage = uiText(R.string.connecting_host, "正在连接 %1\$s…", connection.host),
                     showConnections = false,
-                    timeline = emptyList(),
-                    olderHistoryCursor = null,
-                    hasOlderHistory = false,
+                    timeline = cachedSession?.timeline.orEmpty(),
+                    olderHistoryCursor = cachedSession?.olderHistoryCursor,
+                    hasOlderHistory = cachedSession?.olderHistoryCursor != null,
                     isOlderHistoryLoading = false,
                     olderHistoryError = null,
                     consumedHistoryCursors = emptySet(),
-                    threads = emptyList(),
+                    threads = cachedIndex?.threads.orEmpty(),
                     archivedThreads = emptyList(),
                     isArchivedThreadsLoading = false,
                     archivedThreadsError = null,
-                    projects = emptyList(),
+                    projects = groupThreadsByProject(cachedIndex?.threads.orEmpty()),
                     skills = emptyList(),
                     plugins = emptyList(),
                     isComposerCatalogLoading = true,
                     composerCatalogError = null,
-                    selectedProjectPath = null,
-                    selectedThreadId = null,
+                    selectedProjectPath = cachedIndex?.selectedProjectPath,
+                    selectedThreadId = cachedIndex?.selectedThreadId,
                     threadGoal = null,
                     isGoalLoading = false,
                     goalError = null,
@@ -187,17 +228,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 rpc = client
                 observeEvents(client)
                 val server = withTimeout(20_000) { client.initialize() }
-                val account = withTimeout(20_000) { client.readAccount() }
-                val models = withTimeout(30_000) { client.listModels() }
-                val threads = withTimeout(60_000) { client.listThreads() }
-                val collaborationModes = runCatching {
-                    withTimeout(20_000) { client.listCollaborationModes() }
-                }.getOrDefault(emptyList())
-                val permissionProfiles = runCatching {
-                    withTimeout(20_000) { client.listPermissionProfiles(null) }
-                }.getOrDefault(emptyList())
+                val bootstrap = coroutineScope {
+                    val account = async { withTimeout(20_000) { client.readAccount() } }
+                    val models = async { withTimeout(30_000) { client.listModels() } }
+                    val threads = async { withTimeout(60_000) { client.listThreads() } }
+                    val modes = async { runCatching { withTimeout(3_000) { client.listCollaborationModes() } }.getOrDefault(emptyList()) }
+                    val permissions = async { runCatching { withTimeout(3_000) { client.listPermissionProfiles(null) } }.getOrDefault(emptyList()) }
+                    ConnectionBootstrap(server, account.await(), models.await(), threads.await(), modes.await(), permissions.await())
+                }
                 store.recordUsed(connection.id)
-                ConnectionBootstrap(server, account, models, threads, collaborationModes, permissionProfiles)
+                bootstrap
             }.onSuccess { bootstrap ->
                 val projects = groupThreadsByProject(bootstrap.threads)
                 val selectedModel = bootstrap.models.firstOrNull { model -> model.isDefault }
@@ -227,11 +267,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         plugins = emptyList(),
                         isComposerCatalogLoading = true,
                         composerCatalogError = null,
-                        selectedProjectPath = projects.firstOrNull()?.path,
+                        selectedProjectPath = it.selectedProjectPath ?: projects.firstOrNull()?.path,
                     )
                 }
                 refreshComposerCatalog()
+                cachedIndex?.selectedThreadId?.let { id -> bootstrap.threads.firstOrNull { it.id == id } }?.let(::selectThread)
             }.onFailure { error ->
+                if (error is CancellationException) throw error
                 rpc?.close()
                 rpc = null
                 val unknownHostKey = generateSequence(error) { it.cause }
@@ -241,7 +283,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     _state.update {
                         it.copy(
                             connectionStatus = ConnectionStatus.ERROR,
-                            connectionMessage = "请先确认 SSH 主机指纹",
+                            connectionMessage = uiText(R.string.ui_296, "请先确认 SSH 主机指纹"),
                             pendingHostKeyFingerprint = unknownHostKey.fingerprint,
                         )
                     }
@@ -272,7 +314,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         it.copy(
             pendingHostKeyFingerprint = null,
             connectionStatus = ConnectionStatus.ERROR,
-            connectionMessage = "已取消未验证主机的连接",
+            connectionMessage = uiText(R.string.ui_297, "已取消未验证主机的连接"),
         )
     }
 
@@ -281,6 +323,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun disconnectInternal(clearActive: Boolean) {
+        selectThreadJob?.cancel()
+        readOnlyJob?.cancel()
         eventJob?.cancel()
         eventJob = null
         rpc?.close()
@@ -339,17 +383,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun newThread() {
+        selectThreadJob?.cancel()
+        readOnlyJob?.cancel()
         _state.update { state ->
             val projectPath = state.selectedProjectPath ?: state.projects.firstOrNull()?.path
             if (state.remoteAccount?.canRunCodex != true) {
-                state.copy(notice = "请先登录远端 Codex")
+                state.copy(notice = uiText(R.string.ui_298, "请先登录远端 Codex"))
             } else if (projectPath.isNullOrBlank()) {
-                state.copy(notice = "远端没有可用于新会话的 Codex 项目")
+                state.copy(notice = uiText(R.string.ui_299, "远端没有可用于新会话的 Codex 项目"))
             } else {
                 state.copy(
                     selectedProjectPath = projectPath,
                     selectedThreadId = null,
                     threadGoal = null,
+                    isReadOnlyThread = false,
+                    isTurnRunning = false,
+                    activeTurnId = null,
+                    isBusy = false,
                     isGoalLoading = false,
                     goalError = null,
                     threadTokenUsage = null,
@@ -366,10 +416,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectProject(project: RemoteProject) {
+        selectThreadJob?.cancel()
+        readOnlyJob?.cancel()
         _state.update {
             it.copy(
                 selectedProjectPath = project.path,
                 selectedThreadId = null,
+                isReadOnlyThread = false,
+                isTurnRunning = false,
+                activeTurnId = null,
+                isBusy = false,
                 threadGoal = null,
                 isGoalLoading = false,
                 goalError = null,
@@ -386,9 +442,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectThread(thread: RemoteThread) {
-        if (_state.value.activeConnection == null) return
-        val client = rpc ?: return
-        viewModelScope.launch {
+        val hostId = _state.value.activeConnection?.id ?: return
+        val client = rpc
+        selectThreadJob?.cancel()
+        readOnlyJob?.cancel()
+        selectThreadJob = viewModelScope.launch {
+            val cached = runCatching { withContext(Dispatchers.IO) { cache.session(hostId, thread.id) } }
+                .getOrElse { if (it is CancellationException) throw it else null }
+            val cachedItems = cached?.timeline.orEmpty().associateBy { it.id }
             val projectPath = _state.value.projects
                 .firstOrNull { project -> project.threads.any { it.id == thread.id } }
                 ?.path
@@ -401,19 +462,40 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     isGoalLoading = true,
                     goalError = null,
                     threadTokenUsage = null,
-                    timeline = emptyList(),
+                    timeline = cached?.timeline.orEmpty(),
                     olderHistoryCursor = null,
                     hasOlderHistory = false,
                     isOlderHistoryLoading = false,
                     olderHistoryError = null,
                     consumedHistoryCursors = emptySet(),
-                    isBusy = true,
+                    isBusy = client != null,
+                    isReadOnlyThread = false,
                     isTurnRunning = thread.status.isRemoteThreadActive(),
                     activeTurnId = null,
                 )
             }
+            if (client == null) return@launch
             val session = runCatching { client.resumeThread(thread.id, thread.cwd) }
                 .getOrElse { error ->
+                    if (error is CancellationException) throw error
+                    if (error.message.orEmpty().contains("active writer", true)) {
+                        _state.update { it.copy(isBusy = false, isGoalLoading = false, isReadOnlyThread = true, isTurnRunning = false) }
+                        readOnlyJob = viewModelScope.launch {
+                            while (isActive && _state.value.selectedThreadId == thread.id) {
+                                runCatching { client.readThreadSession(thread.id, thread.cwd) }.onSuccess { read ->
+                                    _state.update { state ->
+                                        if (state.selectedThreadId != thread.id) state else state.copy(
+                                            timeline = mergeTimelineHistory(state.timeline, read.timeline),
+                                            olderHistoryCursor = read.olderHistoryCursor,
+                                            hasOlderHistory = read.olderHistoryCursor != null,
+                                        )
+                                    }
+                                }.onFailure { if (it is CancellationException) throw it else showError(it) }
+                                delay(4_000)
+                            }
+                        }
+                        return@launch
+                    }
                     _state.update { state ->
                         if (state.selectedThreadId == thread.id) state.copy(isGoalLoading = false) else state
                     }
@@ -424,7 +506,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 if (state.selectedThreadId != thread.id) return@update state
                 val model = state.models.firstOrNull { it.id == session.model }
                 state.copy(
-                    timeline = mergeTimelineHistory(session.timeline, state.timeline),
+                    // Keep live events received after resume, while refreshing stale disk items.
+                    timeline = mergeTimelineHistory(mergeTimelineHistory(state.timeline, session.timeline), state.timeline.filter { cachedItems[it.id] != it }),
                     olderHistoryCursor = session.olderHistoryCursor,
                     hasOlderHistory = session.olderHistoryCursor != null,
                     isOlderHistoryLoading = false,
@@ -496,7 +579,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(
                     olderHistoryCursor = null,
                     hasOlderHistory = false,
-                    olderHistoryError = "远端返回了重复的历史游标，已停止继续加载",
+                    olderHistoryError = uiText(R.string.ui_300, "远端返回了重复的历史游标，已停止继续加载"),
                 )
             }
             return
@@ -558,26 +641,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         attachments: List<ComposerImageAttachment> = emptyList(),
         asGoal: Boolean = false,
     ) {
+        if (_state.value.isReadOnlyThread) return
         val prompt = text.trim()
         if (prompt.isEmpty() && attachments.isEmpty()) return
         if (_state.value.activeConnection == null) return
         val client = rpc ?: return
         val currentState = _state.value
         if (currentState.remoteAccount?.canRunCodex != true) {
-            _state.update { it.copy(notice = "远端 Codex 尚未登录") }
+            _state.update { it.copy(notice = uiText(R.string.ui_301, "远端 Codex 尚未登录")) }
             return
         }
         if (asGoal && prompt.isEmpty()) {
-            _state.update { it.copy(notice = "Goal 需要包含文字目标") }
+            _state.update { it.copy(notice = uiText(R.string.ui_302, "Goal 需要包含文字目标")) }
             return
         }
         if (asGoal && currentState.isTurnRunning) {
-            _state.update { it.copy(notice = "当前任务运行期间不能设置 Goal") }
+            _state.update { it.copy(notice = uiText(R.string.ui_303, "当前任务运行期间不能设置 Goal")) }
             return
         }
         val selectedModel = currentState.selectedModel
         if (selectedModel == null) {
-            _state.update { it.copy(notice = "远端没有返回可用模型") }
+            _state.update { it.copy(notice = uiText(R.string.ui_304, "远端没有返回可用模型")) }
             return
         }
         val selectedReasoningEffort = currentState.selectedReasoningEffort
@@ -592,14 +676,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             ?.takeIf { it.isNotBlank() }
             ?: currentState.selectedProjectPath?.takeIf { it.isNotBlank() }
         if (cwd == null) {
-            _state.update { it.copy(notice = "请先选择一个远端项目") }
+            _state.update { it.copy(notice = uiText(R.string.ui_305, "请先选择一个远端项目")) }
             return
         }
         val mentions = resolveComposerMentions(prompt, cwd, selectedMentions, currentState)
         val steeringThreadId = currentState.selectedThreadId.takeIf { currentState.isTurnRunning }
         val steeringTurnId = currentState.activeTurnId.takeIf { currentState.isTurnRunning }
         if (currentState.isTurnRunning && (steeringThreadId == null || steeringTurnId == null)) {
-            _state.update { it.copy(notice = "正在恢复运行中的任务，请等远端 turn id 同步后再追加消息") }
+            _state.update { it.copy(notice = uiText(R.string.ui_306, "正在恢复运行中的任务，请等远端 turn id 同步后再追加消息")) }
             return
         }
         viewModelScope.launch {
@@ -687,7 +771,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }.onSuccess {
                 if (steeringThreadId != null) {
-                    _state.update { it.copy(notice = "已追加到当前运行中的任务") }
+                    _state.update { it.copy(notice = uiText(R.string.ui_307, "已追加到当前运行中的任务")) }
                 }
             }.onFailure { error ->
                 _state.update {
@@ -724,7 +808,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun archiveThread(thread: RemoteThread) {
         val client = rpc ?: return
         if (_state.value.isTurnRunning && _state.value.selectedThreadId == thread.id) {
-            _state.update { it.copy(notice = "请先停止当前任务，再归档会话") }
+            _state.update { it.copy(notice = uiText(R.string.ui_308, "请先停止当前任务，再归档会话")) }
             return
         }
         viewModelScope.launch {
@@ -778,7 +862,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             threads = threads,
                             projects = groupThreadsByProject(threads),
                             archivedThreads = state.archivedThreads.filterNot { it.id == restored.id },
-                            notice = "任务已恢复",
+                            notice = uiText(R.string.ui_309, "任务已恢复"),
                         )
                     }
                 }
@@ -794,7 +878,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     _state.update { state ->
                         state.copy(
                             archivedThreads = state.archivedThreads.filterNot { it.id == thread.id },
-                            notice = "任务已永久删除",
+                            notice = uiText(R.string.ui_310, "任务已永久删除"),
                         )
                     }
                 }
@@ -821,16 +905,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun compactThread() {
         val client = rpc ?: return
         val threadId = _state.value.selectedThreadId ?: run {
-            _state.update { it.copy(notice = "新任务还没有可压缩的上下文") }
+            _state.update { it.copy(notice = uiText(R.string.ui_311, "新任务还没有可压缩的上下文")) }
             return
         }
         if (_state.value.isTurnRunning) {
-            _state.update { it.copy(notice = "任务运行期间不能压缩上下文") }
+            _state.update { it.copy(notice = uiText(R.string.ui_312, "任务运行期间不能压缩上下文")) }
             return
         }
         viewModelScope.launch {
             runCatching { client.compactThread(threadId) }
-                .onSuccess { _state.update { it.copy(notice = "正在压缩任务上下文") } }
+                .onSuccess { _state.update { it.copy(notice = uiText(R.string.ui_313, "正在压缩任务上下文")) } }
                 .onFailure(::showError)
         }
     }
@@ -839,11 +923,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val client = rpc ?: return
         val snapshot = _state.value
         val threadId = snapshot.selectedThreadId ?: run {
-            _state.update { it.copy(notice = "请先打开一个远端任务再继续到新任务") }
+            _state.update { it.copy(notice = uiText(R.string.ui_314, "请先打开一个远端任务再继续到新任务")) }
             return
         }
         if (snapshot.isTurnRunning) {
-            _state.update { it.copy(notice = "请先停止当前任务，再继续到新任务") }
+            _state.update { it.copy(notice = uiText(R.string.ui_315, "请先停止当前任务，再继续到新任务")) }
             return
         }
         val cwd = snapshot.threads.firstOrNull { it.id == threadId }?.cwd
@@ -894,7 +978,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         approvalPolicy = forked.session.approvalPolicy ?: state.approvalPolicy,
                         approvalsReviewer = forked.session.approvalsReviewer ?: state.approvalsReviewer,
                         isBusy = false,
-                        notice = "已继续到新的远端任务",
+                        notice = uiText(R.string.ui_316, "已继续到新的远端任务"),
                     )
                 }
             }.onFailure(::showError)
@@ -905,15 +989,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val client = rpc ?: return
         val snapshot = _state.value
         val threadId = snapshot.selectedThreadId ?: run {
-            _state.update { it.copy(notice = "请先打开一个远端任务再开始代码审查") }
+            _state.update { it.copy(notice = uiText(R.string.ui_317, "请先打开一个远端任务再开始代码审查")) }
             return
         }
         if (snapshot.isTurnRunning) {
-            _state.update { it.copy(notice = "当前任务仍在运行，暂时不能开始代码审查") }
+            _state.update { it.copy(notice = uiText(R.string.ui_318, "当前任务仍在运行，暂时不能开始代码审查")) }
             return
         }
         if (targetKind != ReviewTargetKind.UNCOMMITTED_CHANGES && targetValue.isBlank()) {
-            _state.update { it.copy(notice = "请填写审查目标") }
+            _state.update { it.copy(notice = uiText(R.string.ui_319, "请填写审查目标")) }
             return
         }
         viewModelScope.launch {
@@ -938,14 +1022,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val client = rpc ?: return
         val snapshot = _state.value
         if (snapshot.isTurnRunning) {
-            _state.update { it.copy(notice = "当前任务仍在运行，暂时不能执行 /init") }
+            _state.update { it.copy(notice = uiText(R.string.ui_320, "当前任务仍在运行，暂时不能执行 /init")) }
             return
         }
         val cwd = snapshot.threads.firstOrNull { it.id == snapshot.selectedThreadId }?.cwd
             ?.takeIf(String::isNotBlank)
             ?: snapshot.selectedProjectPath?.takeIf(String::isNotBlank)
             ?: run {
-                _state.update { it.copy(notice = "请先选择一个远端项目") }
+                _state.update { it.copy(notice = uiText(R.string.ui_305, "请先选择一个远端项目")) }
                 return
             }
         viewModelScope.launch {
@@ -953,7 +1037,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { client.remotePathExists(agentsPath) }
                 .onSuccess { exists ->
                     if (exists) {
-                        _state.update { it.copy(notice = "AGENTS.md 已存在，已跳过 /init 以避免覆盖") }
+                        _state.update { it.copy(notice = uiText(R.string.ui_321, "AGENTS.md 已存在，已跳过 /init 以避免覆盖")) }
                     } else {
                         sendMessage(INIT_PROMPT)
                     }
@@ -1016,7 +1100,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         it.copy(
                             isMcpLoginStarting = false,
                             mcpAuthorizationUrl = authorizationUrl,
-                            notice = "请在浏览器中完成 $serverName 授权",
+                            notice = uiText(R.string.browser_auth, "请在浏览器中完成 %1\$s 授权", serverName),
                         )
                     }
                 }
@@ -1042,9 +1126,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             isFeedbackSubmitting = false,
                             feedbackError = null,
                             notice = if (feedbackId.isBlank()) {
-                                "反馈已提交"
+                                uiText(R.string.ui_322, "反馈已提交")
                             } else {
-                                "反馈已提交：$feedbackId"
+                                uiText(R.string.feedback_id, "反馈已提交：%1\$s", feedbackId)
                             },
                         )
                     }
@@ -1059,13 +1143,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun showGoalRequirement() = _state.update {
-        it.copy(notice = "请先发送第一条消息创建远端任务，再使用 /goal 设置 Goal")
+        it.copy(notice = uiText(R.string.ui_323, "请先发送第一条消息创建远端任务，再使用 /goal 设置 Goal"))
     }
 
     fun setThreadGoal(objective: String) {
         val trimmedObjective = objective.trim()
         if (trimmedObjective.isEmpty()) {
-            _state.update { it.copy(goalError = "Goal 不能为空") }
+            _state.update { it.copy(goalError = uiText(R.string.ui_324, "Goal 不能为空")) }
             return
         }
         val client = rpc ?: return
@@ -1090,7 +1174,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             }.onFailure { error ->
-                updateGoalFailure(threadId, "Failed to set goal", error)
+                updateGoalFailure(threadId, uiText(R.string.ui_325, "Failed to set goal"), error)
             }
         }
     }
@@ -1114,7 +1198,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
-                    updateGoalFailure(threadId, "Failed to update goal", error)
+                    updateGoalFailure(threadId, uiText(R.string.ui_326, "Failed to update goal"), error)
                 }
         }
     }
@@ -1135,7 +1219,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
-                    updateGoalFailure(threadId, "Failed to clear goal", error)
+                    updateGoalFailure(threadId, uiText(R.string.ui_327, "Failed to clear goal"), error)
                 }
         }
     }
@@ -1233,10 +1317,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (state.collaborationModes.any { it.mode == mode }) {
             state.copy(
                 selectedCollaborationMode = mode,
-                notice = if (mode == "plan") "已切换到计划模式" else null,
+                notice = if (mode == "plan") uiText(R.string.ui_328, "已切换到计划模式") else null,
             )
         } else {
-            state.copy(notice = "远端 Codex 没有提供 $mode 模式")
+            state.copy(notice = uiText(R.string.mode_missing, "远端 Codex 没有提供 %1\$s 模式", mode))
         }
     }
 
@@ -1387,9 +1471,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                                 val marker = TimelineItem(
                                     id = "compaction-${UUID.randomUUID()}",
                                     kind = TimelineKind.COMPACTION,
-                                    title = "Context compacted",
+                                    title = uiText(R.string.ui_094, "Context compacted"),
                                 )
-                                state.copy(timeline = state.timeline + marker, notice = "任务上下文已压缩")
+                                state.copy(timeline = state.timeline + marker, notice = uiText(R.string.ui_329, "任务上下文已压缩"))
                             }
                         }
                     }
@@ -1398,9 +1482,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             it.copy(
                                 isMcpLoginStarting = false,
                                 notice = if (event.success) {
-                                    "${event.name} 授权完成"
+                                    uiText(R.string.auth_done, "%1\$s 授权完成", event.name)
                                 } else {
-                                    event.error ?: "${event.name} 授权未完成"
+                                    event.error ?: uiText(R.string.auth_not_done, "%1\$s 授权未完成", event.name)
                                 },
                             )
                         }
@@ -1432,7 +1516,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                                 it.copy(
                                     remoteDeviceLogin = null,
                                     isLoginStarting = false,
-                                    notice = event.error ?: "远端 Codex 登录失败",
+                                    notice = event.error ?: uiText(R.string.ui_330, "远端 Codex 登录失败"),
                                 )
                             }
                         }
@@ -1454,7 +1538,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         if (event.message.contains("not found", ignoreCase = true) ||
                             event.message.contains("not recognized", ignoreCase = true)
                         ) {
-                            _state.update { it.copy(notice = "远端登录 shell 找不到 codex 命令：${event.message}") }
+                            _state.update { it.copy(notice = uiText(R.string.codex_missing, "远端登录 shell 找不到 codex 命令：%1\$s", event.message)) }
                         }
                     }
                 }
@@ -1519,16 +1603,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             ?: error::class.java.simpleName
         return when {
             message.contains("goals feature is disabled", ignoreCase = true) ->
-                "远端 Codex 未启用 Goals；请在远端 config.toml 的 [features] 下设置 goals = true 后重连"
+                uiText(R.string.ui_331, "远端 Codex 未启用 Goals；请在远端 config.toml 的 [features] 下设置 goals = true 后重连")
             message.contains("ephemeral thread does not support goals", ignoreCase = true) ->
-                "该任务尚未持久化，发送第一条消息后才能设置 Goal"
+                uiText(R.string.ui_332, "该任务尚未持久化，发送第一条消息后才能设置 Goal")
             error.isUnsupportedRpcMethod("thread/goal/get") ||
                 error.isUnsupportedRpcMethod("thread/goal/set") ||
                 error.isUnsupportedRpcMethod("thread/goal/clear") ->
-                "远端 Codex 版本不支持 Goal，请先更新远端 Codex"
+                uiText(R.string.ui_333, "远端 Codex 版本不支持 Goal，请先更新远端 Codex")
             message.contains("method not found", ignoreCase = true) ||
                 message.contains("unknown method", ignoreCase = true) ->
-                "远端 Codex 版本不支持 Goal，请先更新远端 Codex"
+                uiText(R.string.ui_333, "远端 Codex 版本不支持 Goal，请先更新远端 Codex")
             else -> friendlyError(error)
         }
     }
@@ -1642,6 +1726,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun showError(error: Throwable) {
+        com.codex.remote.data.diagnostics.DebugApi.record("remote_error", error)
         _state.update { it.copy(isBusy = false, notice = friendlyError(error)) }
     }
 
@@ -1653,16 +1738,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return when {
             message.contains("not logged in", ignoreCase = true) ||
                 message.contains("OpenAI authentication", ignoreCase = true) ->
-                "远端 Codex 尚未登录。请在应用中登录，或在远端运行 codex login。"
-            message.contains("auth", ignoreCase = true) -> "SSH 认证失败，请检查用户名和凭据。$message"
-            message.contains("timed out", ignoreCase = true) -> "连接超时，请检查主机、端口、VPN 和防火墙。"
-            message.contains("refused", ignoreCase = true) -> "SSH 连接被拒绝，请确认 sshd 正在监听。"
+                uiText(R.string.ui_334, "远端 Codex 尚未登录。请在应用中登录，或在远端运行 codex login。")
+            message.contains("auth", ignoreCase = true) -> uiText(R.string.ssh_auth_failed, "SSH 认证失败，请检查用户名和凭据。%1\$s", message)
+            message.contains("timed out", ignoreCase = true) -> uiText(R.string.ui_335, "连接超时，请检查主机、端口、VPN 和防火墙。")
+            message.contains("refused", ignoreCase = true) -> uiText(R.string.ui_336, "SSH 连接被拒绝，请确认 sshd 正在监听。")
             else -> message
         }
     }
 
     override fun onCleared() {
+        readOnlyJob?.cancel()
         rpc?.close()
+        _state.update { it.copy(activeConnection = null, connectionStatus = ConnectionStatus.DISCONNECTED, isTurnRunning = false) }
         super.onCleared()
     }
 }
@@ -1744,7 +1831,7 @@ private fun String.isRemoteThreadActive(): Boolean =
     equals("active", ignoreCase = true) || equals("inProgress", ignoreCase = true)
 
 private fun connectionSummary(projects: Int, threads: Int, codexVersion: String): String = buildString {
-    append("已导入 $projects 个项目、$threads 个会话")
+    append(uiText(R.string.import_summary, "已同步 %1\$d 个项目、%2\$d 个会话", projects, threads))
     if (codexVersion.isNotBlank()) append(" · Codex $codexVersion")
 }
 

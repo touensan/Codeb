@@ -430,6 +430,26 @@ class CodexRpcClient(
         resumeThreadLegacy(threadId, cwd)
     }
 
+    suspend fun readThreadSession(threadId: String, cwd: String): RemoteThreadSession {
+        val result = request("thread/read", buildJsonObject {
+            put("threadId", threadId)
+            put("includeTurns", false)
+        })
+        return try {
+            val page = request("thread/turns/list", threadTurnsListParams(threadId, null))
+            sessionFromResume(result, result.obj("thread"), cwd,
+                parseTurnsTimeline(page.array("data")), page.string("nextCursor"))
+        } catch (error: RpcException) {
+            if (!error.isHistoryPaginationUnavailable()) throw error
+            val full = request("thread/read", buildJsonObject {
+                put("threadId", threadId)
+                put("includeTurns", true)
+            })
+            sessionFromResume(full, full.obj("thread"), cwd,
+                parseTurnsTimeline(full.obj("thread")?.array("turns").orEmpty(), descending = false))
+        }
+    }
+
     private suspend fun resumeThreadPaginated(threadId: String, cwd: String): RemoteThreadSession {
         val result = request("thread/resume", threadResumeParams(threadId, cwd, paginated = true))
         val thread = result.obj("thread")
@@ -883,7 +903,7 @@ class CodexRpcClient(
             }
         }
 
-        internal fun threadTurnsListParams(threadId: String, cursor: String): JsonObject = buildJsonObject {
+        internal fun threadTurnsListParams(threadId: String, cursor: String?): JsonObject = buildJsonObject {
             put("threadId", threadId)
             put("cursor", cursor)
             put("limit", THREAD_HISTORY_PAGE_SIZE)

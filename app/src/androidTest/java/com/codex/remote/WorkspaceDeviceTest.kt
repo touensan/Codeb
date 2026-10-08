@@ -451,6 +451,8 @@ val answer = 42
         state: MutableState<AppUiState>,
         callbacks: WorkspaceCallbacks = WorkspaceCallbacks(),
     ) {
+        // Component-only snapshots keep fallback labels; HomeDeviceTest covers native locales.
+        com.codex.remote.ui.UiText.context = null
         composeRule.setContent {
             CodexRemoteTheme(darkTheme = false) {
                 WorkspaceScreen(
@@ -587,7 +589,7 @@ private fun baseState(
     threads: List<RemoteThread> = listOf(thread("thread-a", "Thread A")),
 ): AppUiState {
     val connection = SavedConnection(
-        id = "connection",
+        id = "device-check-${UUID.randomUUID()}",
         name = "QA Host",
         host = "10.0.2.2",
         username = "tester",

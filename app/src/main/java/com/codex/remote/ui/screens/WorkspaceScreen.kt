@@ -1,5 +1,13 @@
 package com.codex.remote.ui.screens
 
+import com.codex.remote.R
+import com.codex.remote.ui.uiText
+
+import androidx.compose.material.icons.outlined.Notifications
+import androidx.compose.material.icons.outlined.Sort
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
+
 import android.content.Context
 import android.text.method.LinkMovementMethod
 import android.net.Uri
@@ -460,6 +468,11 @@ private fun WorkspaceSidebar(
     onOpenArchivedTasks: () -> Unit,
     onOpenConnections: () -> Unit,
 ) {
+    val preferences = LocalContext.current.getSharedPreferences("remote-view", 0)
+    var sortMode by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(preferences.getString("sort", "project") ?: "project") }
+    var activityView by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(preferences.getBoolean("activity", false)) }
+    var sortMenu by remember { mutableStateOf(false) }
+    LaunchedEffect(sortMode, activityView) { preferences.edit().putString("sort", sortMode).putBoolean("activity", activityView).apply() }
     val expandedProjects = remember(state.activeConnection?.id) { mutableStateMapOf<String, Boolean>() }
     var searchQuery by remember(state.activeConnection?.id) { mutableStateOf("") }
     val displayedProjects = remember(state.projects, searchQuery) {
@@ -484,19 +497,32 @@ private fun WorkspaceSidebar(
             Icon(Icons.Outlined.Psychology, contentDescription = null, modifier = Modifier.size(23.dp))
             Spacer(Modifier.width(9.dp))
             Text("Codex", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            IconButton(onClick = { activityView = !activityView }) {
+                Icon(Icons.Outlined.Notifications, contentDescription = if (activityView) uiText(R.string.ui_046, "Close activity view") else uiText(R.string.ui_047, "Activity view"),
+                    tint = if (activityView) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface)
+            }
+            Box {
+                IconButton(onClick = { sortMenu = true }) { Icon(Icons.Outlined.Sort, contentDescription = uiText(R.string.ui_048, "Sort tasks")) }
+                DropdownMenu(sortMenu, { sortMenu = false }) {
+                    listOf("priority" to uiText(R.string.ui_049, "Priority"), "project" to uiText(R.string.ui_050, "By project"), "recent" to uiText(R.string.ui_051, "Newest first")).forEach { (value, label) ->
+                        DropdownMenuItem(text = { Text(label) }, onClick = { sortMode = value; sortMenu = false },
+                            trailingIcon = { if (sortMode == value) Icon(Icons.Outlined.Check, contentDescription = null) })
+                    }
+                }
+            }
         }
-        SidebarAction(Icons.Outlined.Add, "New task", onNewThread)
-        SidebarAction(Icons.Outlined.Archive, "Archived tasks", onOpenArchivedTasks)
+        SidebarAction(Icons.Outlined.Add, uiText(R.string.ui_052, "New task"), onNewThread)
+        SidebarAction(Icons.Outlined.Archive, uiText(R.string.ui_053, "Archived tasks"), onOpenArchivedTasks)
         OutlinedTextField(
             value = searchQuery,
             onValueChange = { searchQuery = it },
             modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
-            placeholder = { Text("Search tasks") },
+            placeholder = { Text(uiText(R.string.ui_054, "Search tasks")) },
             leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
             trailingIcon = {
                 if (searchQuery.isNotEmpty()) {
                     IconButton(onClick = { searchQuery = "" }) {
-                        Icon(Icons.Outlined.Close, contentDescription = "Clear search", modifier = Modifier.size(17.dp))
+                        Icon(Icons.Outlined.Close, contentDescription = uiText(R.string.ui_055, "Clear search"), modifier = Modifier.size(17.dp))
                     }
                 }
             },
@@ -504,7 +530,7 @@ private fun WorkspaceSidebar(
         )
         Spacer(Modifier.height(8.dp))
         Text(
-            "PROJECTS",
+            uiText(R.string.ui_056, "PROJECTS"),
             modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -513,25 +539,34 @@ private fun WorkspaceSidebar(
             if (displayedProjects.isEmpty()) {
                 item(key = "empty-projects") {
                     Text(
-                        if (searchQuery.isBlank()) "No Codex conversations found" else "No matching tasks",
+                        if (searchQuery.isBlank()) uiText(R.string.ui_057, "No Codex conversations found") else uiText(R.string.ui_058, "No matching tasks"),
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 14.dp),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
-            displayedProjects.forEach { project ->
+            if (sortMode != "project" || activityView) {
+                val ordered = displayedProjects.flatMap { it.threads }.sortedWith(
+                    compareByDescending<RemoteThread> { (activityView || sortMode == "priority") && (it.status.contains("active", true) || it.status.contains("running", true)) }
+                        .thenByDescending { sortMode == "priority" && it.isPinned }.thenByDescending { it.updatedAt }.thenBy { it.id },
+                )
+                items(ordered, key = { "flat-${it.id}" }) { thread ->
+                    ThreadSidebarRow(thread, state.selectedThreadId == thread.id, { onSelectThread(thread) }, { onRenameThread(thread) },
+                        { onArchiveThread(thread) }, { onSetThreadPinned(thread, it) })
+                }
+            } else displayedProjects.forEach { project ->
                 item(key = "project-${project.id}") {
                     val expanded = searchQuery.isNotBlank() || expandedProjects[project.id] == true
                     Row(
-                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp))
+                        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
                             .clickable { expandedProjects[project.id] = !expanded }
                             .padding(horizontal = 10.dp, vertical = 9.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Icon(
                             if (expanded) Icons.Outlined.ExpandMore else Icons.Outlined.ChevronRight,
-                            contentDescription = if (expanded) "Collapse project" else "Expand project",
+                            contentDescription = if (expanded) uiText(R.string.ui_059, "Collapse project") else uiText(R.string.ui_060, "Expand project"),
                             modifier = Modifier.size(17.dp),
                         )
                         Spacer(Modifier.width(5.dp))
@@ -562,7 +597,7 @@ private fun WorkspaceSidebar(
                 if (searchQuery.isNotBlank() || expandedProjects[project.id] == true) {
                     item(key = "new-${project.id}") {
                         Row(
-                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp))
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
                                 .clickable {
                                     onSelectProject(project)
                                     onNewThread()
@@ -572,7 +607,7 @@ private fun WorkspaceSidebar(
                         ) {
                             Icon(Icons.Outlined.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("New task", style = MaterialTheme.typography.bodyMedium)
+                            Text(uiText(R.string.ui_052, "New task"), style = MaterialTheme.typography.bodyMedium)
                         }
                     }
                     items(project.threads, key = { "thread-${it.id}" }) { thread ->
@@ -596,7 +631,7 @@ private fun WorkspaceSidebar(
             Icon(Icons.Outlined.Computer, contentDescription = null, modifier = Modifier.size(20.dp))
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text(state.activeConnection?.name ?: "Remote host", style = MaterialTheme.typography.labelLarge)
+                Text(state.activeConnection?.name ?: uiText(R.string.ui_061, "Remote host"), style = MaterialTheme.typography.labelLarge)
                 Text(
                     state.activeConnection?.let { "${it.username}@${it.host}" }.orEmpty(),
                     style = MaterialTheme.typography.bodySmall,
@@ -605,7 +640,7 @@ private fun WorkspaceSidebar(
                 )
                 Text(
                     state.remoteAccount?.let { account ->
-                        account.email ?: account.planType ?: account.type ?: "Codex sign-in required"
+                        account.email ?: account.planType ?: account.type ?: uiText(R.string.ui_062, "Codex sign-in required")
                     }.orEmpty(),
                     style = MaterialTheme.typography.bodySmall,
                     color = if (state.remoteAccount?.canRunCodex == false) {
@@ -617,7 +652,7 @@ private fun WorkspaceSidebar(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-            Icon(Icons.Outlined.Settings, contentDescription = "连接设置", modifier = Modifier.size(18.dp))
+            Icon(Icons.Outlined.Settings, contentDescription = uiText(R.string.ui_063, "连接设置"), modifier = Modifier.size(18.dp))
         }
         Spacer(Modifier.navigationBarsPadding())
     }
@@ -634,7 +669,7 @@ private fun ThreadSidebarRow(
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     Row(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp))
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
             .background(if (selected) MaterialTheme.colorScheme.surface else Color.Transparent)
             .clickable(onClick = onSelect)
             .padding(start = 38.dp, end = 3.dp, top = 6.dp, bottom = 6.dp),
@@ -659,7 +694,7 @@ private fun ThreadSidebarRow(
         if (thread.isPinned) {
             Icon(
                 Icons.Outlined.PushPin,
-                contentDescription = "Pinned",
+                contentDescription = uiText(R.string.ui_064, "Pinned"),
                 modifier = Modifier.size(14.dp),
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -670,7 +705,7 @@ private fun ThreadSidebarRow(
         }
         Box {
             IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(34.dp)) {
-                Icon(Icons.Outlined.MoreVert, contentDescription = "Task actions", modifier = Modifier.size(17.dp))
+                Icon(Icons.Outlined.MoreVert, contentDescription = uiText(R.string.ui_065, "Task actions"), modifier = Modifier.size(17.dp))
             }
             ThreadActionsMenu(
                 expanded = menuOpen,
@@ -708,13 +743,13 @@ private fun ThreadActionsMenu(
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
         DropdownMenuItem(
-            text = { Text("Rename") },
+            text = { Text(uiText(R.string.ui_066, "Rename")) },
             leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
             onClick = onRename,
         )
         onCompact?.let { compact ->
             DropdownMenuItem(
-                text = { Text("Compact context") },
+                text = { Text(uiText(R.string.ui_067, "Compact context")) },
                 leadingIcon = { Icon(Icons.Outlined.Compress, contentDescription = null) },
                 enabled = compactEnabled,
                 onClick = compact,
@@ -722,27 +757,27 @@ private fun ThreadActionsMenu(
         }
         onFork?.let { fork ->
             DropdownMenuItem(
-                text = { Text("Fork task") },
+                text = { Text(uiText(R.string.ui_068, "Fork task")) },
                 leadingIcon = { Icon(Icons.AutoMirrored.Outlined.CallSplit, contentDescription = null) },
                 onClick = fork,
             )
         }
         onReview?.let { review ->
             DropdownMenuItem(
-                text = { Text("Review changes") },
+                text = { Text(uiText(R.string.ui_069, "Review changes")) },
                 leadingIcon = { Icon(Icons.Outlined.Code, contentDescription = null) },
                 onClick = review,
             )
         }
         if (isPinned != null) {
             DropdownMenuItem(
-                text = { Text(if (isPinned) "Unpin" else "Pin") },
+                text = { Text(if (isPinned) uiText(R.string.ui_070, "Unpin") else uiText(R.string.ui_071, "Pin")) },
                 leadingIcon = { Icon(Icons.Outlined.PushPin, contentDescription = null) },
                 onClick = { onSetPinned(!isPinned) },
             )
         }
         DropdownMenuItem(
-            text = { Text("Archive") },
+            text = { Text(uiText(R.string.ui_072, "Archive")) },
             leadingIcon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
             onClick = onArchive,
         )
@@ -752,7 +787,7 @@ private fun ThreadActionsMenu(
 @Composable
 private fun SidebarAction(icon: ImageVector, label: String, onClick: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp).clip(RoundedCornerShape(5.dp))
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp).clip(RoundedCornerShape(20.dp))
             .clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -812,6 +847,7 @@ private fun WorkspaceContent(
     var hasPositionedConversation by remember(conversationKey) { mutableStateOf(false) }
     val currentThread = state.threads.firstOrNull { it.id == state.selectedThreadId }
     val canCompose = state.connectionStatus == ConnectionStatus.CONNECTED &&
+        !state.isReadOnlyThread &&
         state.remoteAccount?.canRunCodex == true &&
         state.models.isNotEmpty() &&
         (state.selectedProjectPath?.isNotBlank() == true || state.selectedThreadId != null)
@@ -843,7 +879,7 @@ private fun WorkspaceContent(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (showMenu) {
-                            IconButton(onClick = onMenu) { Icon(Icons.Outlined.Menu, contentDescription = "打开会话") }
+                            IconButton(onClick = onMenu) { Icon(Icons.Outlined.Menu, contentDescription = uiText(R.string.ui_073, "打开会话")) }
                         }
                         Column(Modifier.weight(1f)) {
                             Text(
@@ -872,17 +908,23 @@ private fun WorkspaceContent(
             }
         },
     ) { padding ->
-        when (state.connectionStatus) {
+        if (state.connectionStatus != ConnectionStatus.CONNECTED && state.timeline.isNotEmpty()) {
+            Column(Modifier.fillMaxSize().padding(padding)) {
+                Text(state.connectionMessage, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
+                Conversation(state, conversationListState, followLatest, { followLatest = it }, hasPositionedConversation,
+                    { hasPositionedConversation = true }, Modifier.fillMaxWidth().weight(1f), onLoadOlderHistory)
+            }
+        } else when (state.connectionStatus) {
             ConnectionStatus.CONNECTING -> ConnectionState(
                 icon = null,
-                title = "Connecting over SSH",
+                title = uiText(R.string.ui_074, "Connecting over SSH"),
                 detail = state.connectionMessage,
                 loading = true,
                 modifier = Modifier.fillMaxSize().padding(padding),
             )
             ConnectionStatus.ERROR -> ConnectionState(
                 icon = Icons.Outlined.ErrorOutline,
-                title = "Connection failed",
+                title = uiText(R.string.ui_075, "Connection failed"),
                 detail = state.connectionMessage,
                 loading = false,
                 action = onOpenConnections,
@@ -896,12 +938,14 @@ private fun WorkspaceContent(
                 )
                 state.models.isEmpty() -> ConnectionState(
                     icon = Icons.Outlined.ErrorOutline,
-                    title = "No remote models",
-                    detail = "远端 app-server 没有返回可用模型。请检查远端 Codex 版本和模型提供方配置。",
+                    title = uiText(R.string.ui_076, "No remote models"),
+                    detail = uiText(R.string.ui_077, "远端 app-server 没有返回可用模型。请检查远端 Codex 版本和模型提供方配置。"),
                     loading = false,
                     modifier = Modifier.fillMaxSize().padding(padding),
                 )
                 else -> Column(Modifier.fillMaxSize().padding(padding)) {
+                    if (state.isReadOnlyThread) Text(uiText(R.string.ui_078, "Another Codex process owns this task. History is syncing in read-only mode."),
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
                     Conversation(
                         state = state,
                         listState = conversationListState,
@@ -957,7 +1001,7 @@ private fun WorkspaceContent(
             }
             ConnectionStatus.DISCONNECTED -> ConnectionState(
                 icon = Icons.Outlined.Computer,
-                title = "Disconnected",
+                title = uiText(R.string.ui_079, "Disconnected"),
                 detail = state.activeConnection?.name.orEmpty(),
                 loading = false,
                 action = onOpenConnections,
@@ -1025,7 +1069,7 @@ private fun ThreadHeaderOverflow(
     var expanded by remember { mutableStateOf(false) }
     Box {
         IconButton(onClick = { expanded = true }) {
-            Icon(Icons.Outlined.MoreVert, contentDescription = "Task actions")
+            Icon(Icons.Outlined.MoreVert, contentDescription = uiText(R.string.ui_065, "Task actions"))
         }
         ThreadActionsMenu(
             expanded = expanded,
@@ -1105,7 +1149,7 @@ internal fun groupConsecutiveCommands(timeline: List<TimelineItem>): List<Timeli
                 buildString {
                     append(commandIndex + 1)
                     append(". ")
-                    append(command.title.ifBlank { "Command" })
+                    append(command.title.ifBlank { uiText(R.string.ui_080, "Command") })
                     if (command.body.isNotBlank()) {
                         append('\n')
                         append(command.body.trimEnd())
@@ -1117,7 +1161,7 @@ internal fun groupConsecutiveCommands(timeline: List<TimelineItem>): List<Timeli
                     item = TimelineItem(
                         id = "command-group:${commands.first().id}",
                         kind = TimelineKind.COMMAND,
-                        title = "运行了多个命令",
+                        title = uiText(R.string.ui_081, "运行了多个命令"),
                         body = body,
                         status = status,
                     ),
@@ -1183,7 +1227,7 @@ private fun Conversation(
                 }
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    if (state.isBusy) "正在加载最近消息" else project?.name ?: "No remote Codex history",
+                    if (state.isBusy) uiText(R.string.ui_082, "正在加载最近消息") else project?.name ?: uiText(R.string.ui_083, "No remote Codex history"),
                     style = MaterialTheme.typography.headlineSmall,
                 )
                 Spacer(Modifier.height(5.dp))
@@ -1197,7 +1241,7 @@ private fun Conversation(
                     TextButton(onClick = onLoadOlderHistory) {
                         Icon(Icons.Outlined.KeyboardArrowUp, contentDescription = null)
                         Spacer(Modifier.width(6.dp))
-                        Text("加载更早消息")
+                        Text(uiText(R.string.ui_084, "加载更早消息"))
                     }
                 }
             }
@@ -1365,17 +1409,17 @@ private fun Conversation(
                         state.olderHistoryError != null && state.hasOlderHistory -> TextButton(onClick = requestOlderHistory) {
                             Icon(Icons.Outlined.Refresh, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text("重试加载更早消息", maxLines = 1)
+                            Text(uiText(R.string.ui_085, "重试加载更早消息"), maxLines = 1)
                         }
                         state.olderHistoryError != null -> Text(
-                            "无法继续加载更早消息",
+                            uiText(R.string.ui_086, "无法继续加载更早消息"),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error,
                         )
                         state.hasOlderHistory -> TextButton(onClick = requestOlderHistory) {
                             Icon(Icons.Outlined.KeyboardArrowUp, contentDescription = null)
                             Spacer(Modifier.width(6.dp))
-                            Text("加载更早消息")
+                            Text(uiText(R.string.ui_084, "加载更早消息"))
                         }
                     }
                 }
@@ -1397,7 +1441,7 @@ private fun Conversation(
                     ) {
                         CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(9.dp))
-                        Text("Working", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(uiText(R.string.ui_087, "Working"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             }
@@ -1427,7 +1471,7 @@ private fun Conversation(
                 containerColor = MaterialTheme.colorScheme.surface,
                 contentColor = MaterialTheme.colorScheme.onSurface,
             ) {
-                Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = "回到最新消息")
+                Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = uiText(R.string.ui_088, "回到最新消息"))
             }
         }
     }
@@ -1467,7 +1511,7 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
             Surface(
                 modifier = Modifier.widthIn(max = 620.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant,
-                shape = RoundedCornerShape(7.dp),
+                shape = RoundedCornerShape(20.dp),
             ) {
                 Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
                     SelectionContainer { Text(item.body, style = MaterialTheme.typography.bodyLarge) }
@@ -1485,7 +1529,7 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
                             )
                             Spacer(Modifier.width(5.dp))
                             Text(
-                                "作为目标发送",
+                                uiText(R.string.ui_089, "作为目标发送"),
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -1500,7 +1544,7 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
         TimelineKind.REASONING -> ExpandableTool(
             modifier,
             Icons.Outlined.SmartToy,
-            item.title.ifBlank { "Reasoning" },
+            item.title.ifBlank { uiText(R.string.ui_090, "Reasoning") },
             item.body,
             item.status,
             expansionKey = item.id,
@@ -1509,23 +1553,23 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
         TimelineKind.PLAN -> ExpandableTool(
             modifier,
             Icons.AutoMirrored.Outlined.List,
-            item.title.ifBlank { "Plan" },
+            item.title.ifBlank { uiText(R.string.ui_091, "Plan") },
             item.body,
             item.status,
             expansionKey = item.id,
             autoCollapseOnComplete = true,
         )
         TimelineKind.COMMAND -> ExpandableTool(
-            modifier, Icons.Outlined.Terminal, item.title.ifBlank { "Command" }, item.body, item.status,
+            modifier, Icons.Outlined.Terminal, item.title.ifBlank { uiText(R.string.ui_080, "Command") }, item.body, item.status,
             expansionKey = item.id, mono = true, autoCollapseOnComplete = true,
         )
         TimelineKind.FILE_CHANGE -> FileChangesTool(item, modifier)
         TimelineKind.TOOL -> ExpandableTool(
-            modifier, Icons.Outlined.Build, item.title.ifBlank { "Tool" }, item.body, item.status,
+            modifier, Icons.Outlined.Build, item.title.ifBlank { uiText(R.string.ui_092, "Tool") }, item.body, item.status,
             expansionKey = item.id, mono = true, autoCollapseOnComplete = true,
         )
         TimelineKind.REVIEW -> ExpandableTool(
-            modifier, Icons.Outlined.Code, item.title.ifBlank { "Code review" }, item.body, item.status,
+            modifier, Icons.Outlined.Code, item.title.ifBlank { uiText(R.string.ui_093, "Code review") }, item.body, item.status,
             expansionKey = item.id, autoCollapseOnComplete = true,
         )
         TimelineKind.COMPACTION -> Row(
@@ -1540,14 +1584,14 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                item.title.ifBlank { "Context compacted" },
+                item.title.ifBlank { uiText(R.string.ui_094, "Context compacted") },
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             HorizontalDivider(Modifier.weight(1f).padding(start = 8.dp))
         }
         TimelineKind.ERROR -> ExpandableTool(
-            modifier, Icons.Outlined.ErrorOutline, item.title.ifBlank { "Error" }, item.body, item.status,
+            modifier, Icons.Outlined.ErrorOutline, item.title.ifBlank { uiText(R.string.ui_095, "Error") }, item.body, item.status,
             expansionKey = item.id,
         )
     }
@@ -1564,13 +1608,13 @@ private fun FileChangesTool(item: TimelineItem, modifier: Modifier) {
         total.first + changeCounts.first to total.second + changeCounts.second
     }
     val title = when (item.fileChanges.size) {
-        0 -> item.title.ifBlank { "File changes" }
+        0 -> item.title.ifBlank { uiText(R.string.ui_096, "File changes") }
         1 -> item.fileChanges.first().path
-        else -> "已编辑 ${item.fileChanges.size} 个文件"
+        else -> uiText(R.string.file_count, "已编辑 %1\$d 个文件", item.fileChanges.size)
     }
     Surface(
         modifier = modifier.animateContentSize().testTag("file-changes-${item.id}"),
-        shape = RoundedCornerShape(6.dp),
+        shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
         Column {
@@ -1598,7 +1642,7 @@ private fun FileChangesTool(item: TimelineItem, modifier: Modifier) {
                 }
                 Icon(
                     if (expanded) Icons.Outlined.ExpandMore else Icons.Outlined.ChevronRight,
-                    contentDescription = if (expanded) "收起文件修改" else "展开文件修改",
+                    contentDescription = if (expanded) uiText(R.string.ui_097, "收起文件修改") else uiText(R.string.ui_098, "展开文件修改"),
                     modifier = Modifier.size(18.dp),
                 )
             }
@@ -1606,7 +1650,7 @@ private fun FileChangesTool(item: TimelineItem, modifier: Modifier) {
                 HorizontalDivider()
                 if (item.fileChanges.isEmpty()) {
                     Text(
-                        item.body.ifBlank { "No file details" },
+                        item.body.ifBlank { uiText(R.string.ui_099, "No file details") },
                         modifier = Modifier.fillMaxWidth().padding(12.dp),
                         style = MonoText,
                     )
@@ -1639,7 +1683,7 @@ private fun FileChangeBlock(change: FileChangeSummary) {
                 overflow = TextOverflow.Ellipsis,
             )
             Surface(
-                shape = RoundedCornerShape(4.dp),
+                shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.surface,
             ) {
                 Text(
@@ -1696,10 +1740,10 @@ internal fun diffLineCounts(diff: String): Pair<Int, Int> {
 }
 
 private fun String.displayFileChangeKind(): String = when (lowercase()) {
-    "add", "added", "create", "created" -> "Added"
-    "delete", "deleted", "remove", "removed" -> "Deleted"
-    "rename", "renamed", "move", "moved" -> "Renamed"
-    else -> "Modified"
+    "add", "added", "create", "created" -> uiText(R.string.ui_100, "Added")
+    "delete", "deleted", "remove", "removed" -> uiText(R.string.ui_101, "Deleted")
+    "rename", "renamed", "move", "moved" -> uiText(R.string.ui_102, "Renamed")
+    else -> uiText(R.string.ui_103, "Modified")
 }
 
 @Composable
@@ -1721,7 +1765,7 @@ private fun ExpandableTool(
     }
     Surface(
         modifier = modifier.animateContentSize().testTag("timeline-tool-$expansionKey"),
-        shape = RoundedCornerShape(6.dp),
+        shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
         Column {
@@ -1736,7 +1780,7 @@ private fun ExpandableTool(
                 Spacer(Modifier.width(6.dp))
                 Icon(
                     if (expanded) Icons.Outlined.ExpandMore else Icons.Outlined.ChevronRight,
-                    contentDescription = if (expanded) "收起" else "展开",
+                    contentDescription = if (expanded) uiText(R.string.ui_104, "收起") else uiText(R.string.ui_105, "展开"),
                     modifier = Modifier.size(18.dp),
                 )
             }
@@ -1762,7 +1806,7 @@ internal fun String.isTimelineItemRunning(): Boolean =
         equals("started", ignoreCase = true)
 
 @Composable
-private fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
+internal fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val density = LocalDensity.current
     val latexTextSize = with(density) { MaterialTheme.typography.bodyLarge.fontSize.toPx() }
@@ -1901,7 +1945,18 @@ private fun Composer(
     onClearRemoteDirectory: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    var text by remember(state.selectedThreadId) { mutableStateOf(TextFieldValue()) }
+    val draftContext = LocalContext.current
+    val draftStore = remember(draftContext) { com.codex.remote.data.store.LocalStore(draftContext) }
+    val draftHost = state.activeConnection?.id.orEmpty()
+    val draftKey = state.selectedThreadId ?: "project:${state.selectedProjectPath.orEmpty()}"
+    var text by remember(draftHost, draftKey) { mutableStateOf(TextFieldValue(runCatching { draftStore.draft(draftHost, draftKey) }.getOrDefault(""))) }
+    val latestDraft by rememberUpdatedState(text.text)
+    LaunchedEffect(text.text, draftHost, draftKey) {
+        withContext(Dispatchers.IO) { runCatching { draftStore.saveDraft(draftHost, draftKey, text.text) } }
+    }
+    DisposableEffect(draftHost, draftKey) {
+        onDispose { runCatching { draftStore.saveDraft(draftHost, draftKey, latestDraft) } }
+    }
     var selectedMentions by remember(state.selectedThreadId) { mutableStateOf(emptyList<ComposerMention>()) }
     var attachments by remember(state.selectedThreadId) { mutableStateOf(emptyList<ComposerImageAttachment>()) }
     var attachmentError by remember(state.selectedThreadId) { mutableStateOf<String?>(null) }
@@ -1922,7 +1977,7 @@ private fun Composer(
                 attachments = (attachments + attachment).takeLast(MAX_COMPOSER_IMAGES)
                 attachmentError = null
             }.onFailure { error ->
-                attachmentError = error.message ?: "Unable to attach image"
+                attachmentError = error.message ?: uiText(R.string.ui_106, "Unable to attach image")
             }
         }
     }
@@ -2150,10 +2205,10 @@ private fun Composer(
             }
             Surface(
                 modifier = Modifier.fillMaxWidth().widthIn(max = 860.dp).padding(horizontal = 12.dp, vertical = 8.dp),
-                shape = RoundedCornerShape(7.dp),
+                shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.surface,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                shadowElevation = 2.dp,
+                shadowElevation = 0.dp,
             ) {
                 Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
                     if (attachments.isNotEmpty()) {
@@ -2164,7 +2219,7 @@ private fun Composer(
                         ) {
                             attachments.forEach { attachment ->
                                 Surface(
-                                    shape = RoundedCornerShape(5.dp),
+                                    shape = RoundedCornerShape(20.dp),
                                     color = MaterialTheme.colorScheme.surfaceVariant,
                                 ) {
                                     Row(
@@ -2184,7 +2239,7 @@ private fun Composer(
                                             onClick = { attachments = attachments.filterNot { it.id == attachment.id } },
                                             modifier = Modifier.size(28.dp),
                                         ) {
-                                            Icon(Icons.Outlined.Close, contentDescription = "Remove image", modifier = Modifier.size(15.dp))
+                                            Icon(Icons.Outlined.Close, contentDescription = uiText(R.string.ui_107, "Remove image"), modifier = Modifier.size(15.dp))
                                         }
                                     }
                                 }
@@ -2223,9 +2278,9 @@ private fun Composer(
                                 if (text.text.isEmpty()) {
                                     Text(
                                         if (goalModeActive) {
-                                            "描述你的目标，最好包含可衡量的结果"
+                                            uiText(R.string.ui_108, "描述你的目标，最好包含可衡量的结果")
                                         } else {
-                                            "Ask Codex"
+                                            uiText(R.string.ui_109, "Ask Codex")
                                         },
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2339,7 +2394,7 @@ private fun Composer(
                             ) {
                                 Icon(
                                     Icons.Outlined.KeyboardHide,
-                                    contentDescription = "Hide keyboard",
+                                    contentDescription = uiText(R.string.ui_110, "Hide keyboard"),
                                     modifier = Modifier.size(19.dp),
                                 )
                             }
@@ -2351,7 +2406,7 @@ private fun Composer(
                                 enabled = state.activeTurnId != null,
                                 modifier = Modifier.size(34.dp),
                             ) {
-                                Icon(Icons.Outlined.Stop, contentDescription = "停止")
+                                Icon(Icons.Outlined.Stop, contentDescription = uiText(R.string.ui_111, "停止"))
                             }
                             Spacer(Modifier.width(4.dp))
                         }
@@ -2437,7 +2492,7 @@ private fun Composer(
                             ) {
                                 Icon(
                                     Icons.AutoMirrored.Outlined.Send,
-                                    contentDescription = if (state.isTurnRunning) "追加到当前任务" else "发送",
+                                    contentDescription = if (state.isTurnRunning) uiText(R.string.ui_112, "追加到当前任务") else uiText(R.string.ui_113, "发送"),
                                     tint = MaterialTheme.colorScheme.onPrimary,
                                 )
                             }
@@ -2485,7 +2540,7 @@ private fun ComposerAddMenu(
 ) {
     Box {
         IconButton(onClick = onOpen, modifier = modifier.size(32.dp)) {
-            Icon(Icons.Outlined.Add, contentDescription = "添加", modifier = Modifier.size(20.dp))
+            Icon(Icons.Outlined.Add, contentDescription = uiText(R.string.ui_114, "添加"), modifier = Modifier.size(20.dp))
         }
         DropdownMenu(
             expanded = expanded,
@@ -2494,42 +2549,42 @@ private fun ComposerAddMenu(
             properties = properties,
         ) {
             Text(
-                "添加",
+                uiText(R.string.ui_114, "添加"),
                 modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             AddMenuItem(
                 icon = Icons.Outlined.FolderOpen,
-                title = "文件和文件夹",
-                description = "选择远端项目中的路径",
+                title = uiText(R.string.ui_115, "文件和文件夹"),
+                description = uiText(R.string.ui_116, "选择远端项目中的路径"),
                 enabled = canBrowseRemoteFiles,
                 onClick = onBrowseRemoteFiles,
             )
             AddMenuItem(
                 icon = Icons.Outlined.Image,
-                title = "图片",
-                description = "从 Android 设备添加图片",
+                title = uiText(R.string.ui_117, "图片"),
+                description = uiText(R.string.ui_118, "从 Android 设备添加图片"),
                 enabled = canAttachImage,
                 onClick = onAttachImage,
             )
             AddMenuItem(
                 icon = Icons.Outlined.Flag,
-                title = "目标",
-                description = "设置要持续追求的目标",
+                title = uiText(R.string.ui_119, "目标"),
+                description = uiText(R.string.ui_120, "设置要持续追求的目标"),
                 onClick = onOpenGoal,
             )
             AddMenuItem(
                 icon = Icons.AutoMirrored.Outlined.List,
-                title = "计划模式",
-                description = "开启远端计划模式",
+                title = uiText(R.string.ui_121, "计划模式"),
+                description = uiText(R.string.ui_122, "开启远端计划模式"),
                 enabled = planModeAvailable,
                 onClick = onPlanMode,
             )
             if (skills.isNotEmpty() || plugins.isNotEmpty()) {
                 HorizontalDivider(Modifier.padding(vertical = 4.dp))
                 Text(
-                    "技能和插件",
+                    uiText(R.string.ui_123, "技能和插件"),
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2601,7 +2656,7 @@ private fun RemotePathPickerDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("文件和文件夹") },
+        title = { Text(uiText(R.string.ui_115, "文件和文件夹")) },
         text = {
             Column {
                 Text(
@@ -2625,7 +2680,7 @@ private fun RemotePathPickerDialog(
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
                         Text(state.remoteDirectoryError, color = MaterialTheme.colorScheme.error)
-                        TextButton(onClick = { onNavigate(currentPath) }) { Text("重试") }
+                        TextButton(onClick = { onNavigate(currentPath) }) { Text(uiText(R.string.ui_124, "重试")) }
                     }
                     else -> LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
                         if (parentPath != null) {
@@ -2640,7 +2695,7 @@ private fun RemotePathPickerDialog(
                             }
                         }
                         if (state.remoteDirectoryEntries.isEmpty() && parentPath == null) {
-                            item { Text("该文件夹为空", Modifier.padding(vertical = 24.dp)) }
+                            item { Text(uiText(R.string.ui_125, "该文件夹为空"), Modifier.padding(vertical = 24.dp)) }
                         }
                     }
                 }
@@ -2648,10 +2703,10 @@ private fun RemotePathPickerDialog(
         },
         confirmButton = {
             TextButton(onClick = { onSelect(currentPath) }, enabled = !state.isRemoteDirectoryLoading) {
-                Text("选择此文件夹")
+                Text(uiText(R.string.ui_126, "选择此文件夹"))
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_008, "取消")) } },
     )
 }
 
@@ -2742,7 +2797,7 @@ private fun GoalBar(
             Spacer(Modifier.width(7.dp))
         }
         IconButton(onClick = onEdit, enabled = !loading, modifier = Modifier.size(34.dp)) {
-            Icon(Icons.Outlined.Edit, contentDescription = "Edit goal", modifier = Modifier.size(18.dp))
+            Icon(Icons.Outlined.Edit, contentDescription = uiText(R.string.ui_127, "Edit goal"), modifier = Modifier.size(18.dp))
         }
         when (goal.status) {
             ThreadGoalStatus.ACTIVE -> IconButton(
@@ -2750,7 +2805,7 @@ private fun GoalBar(
                 enabled = !loading,
                 modifier = Modifier.size(34.dp),
             ) {
-                Icon(Icons.Outlined.Pause, contentDescription = "Pause goal", modifier = Modifier.size(18.dp))
+                Icon(Icons.Outlined.Pause, contentDescription = uiText(R.string.ui_128, "Pause goal"), modifier = Modifier.size(18.dp))
             }
             ThreadGoalStatus.PAUSED,
             ThreadGoalStatus.BLOCKED,
@@ -2760,14 +2815,14 @@ private fun GoalBar(
                 enabled = !loading,
                 modifier = Modifier.size(34.dp),
             ) {
-                Icon(Icons.Outlined.PlayArrow, contentDescription = "Resume goal", modifier = Modifier.size(19.dp))
+                Icon(Icons.Outlined.PlayArrow, contentDescription = uiText(R.string.ui_129, "Resume goal"), modifier = Modifier.size(19.dp))
             }
             ThreadGoalStatus.BUDGET_LIMITED,
             ThreadGoalStatus.COMPLETE,
             -> Unit
         }
         IconButton(onClick = onClear, enabled = !loading, modifier = Modifier.size(34.dp)) {
-            Icon(Icons.Outlined.Close, contentDescription = "Clear goal", modifier = Modifier.size(18.dp))
+            Icon(Icons.Outlined.Close, contentDescription = uiText(R.string.ui_130, "Clear goal"), modifier = Modifier.size(18.dp))
         }
     }
 }
@@ -2783,14 +2838,14 @@ private fun GoalEditorDialog(
     var objective by remember(initialObjective) { mutableStateOf(initialObjective) }
     AlertDialog(
         onDismissRequest = { if (!isSaving) onDismiss() },
-        title = { Text(if (initialObjective.isBlank()) "Add goal" else "Edit goal") },
+        title = { Text(if (initialObjective.isBlank()) uiText(R.string.ui_131, "Add goal") else uiText(R.string.ui_127, "Edit goal")) },
         text = {
             Column {
                 OutlinedTextField(
                     value = objective,
                     onValueChange = { objective = it },
                     modifier = Modifier.fillMaxWidth().testTag("goal-editor-input"),
-                    label = { Text("Goal") },
+                    label = { Text(uiText(R.string.ui_132, "Goal")) },
                     minLines = 2,
                     maxLines = 5,
                     enabled = !isSaving,
@@ -2806,11 +2861,11 @@ private fun GoalEditorDialog(
                 onClick = { onSave(objective) },
                 enabled = objective.isNotBlank() && !isSaving,
             ) {
-                Text(if (isSaving) "Saving…" else "Save")
+                Text(if (isSaving) uiText(R.string.ui_133, "Saving…") else uiText(R.string.ui_038, "Save"))
             }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss, enabled = !isSaving) { Text("Cancel") }
+            TextButton(onClick = onDismiss, enabled = !isSaving) { Text(uiText(R.string.ui_037, "Cancel")) }
         },
     )
 }
@@ -2824,21 +2879,21 @@ private fun ReviewDialog(
     var targetValue by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Code review") },
+        title = { Text(uiText(R.string.ui_093, "Code review")) },
         text = {
             Column {
                 ReviewTargetOption(
-                    label = "Uncommitted changes",
+                    label = uiText(R.string.ui_134, "Uncommitted changes"),
                     selected = target == ReviewTargetKind.UNCOMMITTED_CHANGES,
                     onSelect = { target = ReviewTargetKind.UNCOMMITTED_CHANGES },
                 )
                 ReviewTargetOption(
-                    label = "Compare with base branch",
+                    label = uiText(R.string.ui_135, "Compare with base branch"),
                     selected = target == ReviewTargetKind.BASE_BRANCH,
                     onSelect = { target = ReviewTargetKind.BASE_BRANCH },
                 )
                 ReviewTargetOption(
-                    label = "Custom review",
+                    label = uiText(R.string.ui_136, "Custom review"),
                     selected = target == ReviewTargetKind.CUSTOM,
                     onSelect = { target = ReviewTargetKind.CUSTOM },
                 )
@@ -2849,7 +2904,7 @@ private fun ReviewDialog(
                         onValueChange = { targetValue = it },
                         modifier = Modifier.fillMaxWidth(),
                         label = {
-                            Text(if (target == ReviewTargetKind.BASE_BRANCH) "Base branch" else "Instructions")
+                            Text(if (target == ReviewTargetKind.BASE_BRANCH) uiText(R.string.ui_137, "Base branch") else uiText(R.string.ui_138, "Instructions"))
                         },
                         minLines = if (target == ReviewTargetKind.CUSTOM) 2 else 1,
                         maxLines = 4,
@@ -2861,9 +2916,9 @@ private fun ReviewDialog(
             TextButton(
                 onClick = { onStart(target, targetValue) },
                 enabled = target == ReviewTargetKind.UNCOMMITTED_CHANGES || targetValue.isNotBlank(),
-            ) { Text("Start review") }
+            ) { Text(uiText(R.string.ui_139, "Start review")) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_037, "Cancel")) } },
     )
 }
 
@@ -2888,17 +2943,17 @@ private fun FeedbackDialog(
     onSubmit: (String, String) -> Unit,
 ) {
     val classifications = listOf(
-        "bug" to "Bug",
-        "bad" to "Result was wrong",
-        "good" to "Result was helpful",
-        "other" to "Other",
+        "bug" to uiText(R.string.ui_140, "Bug"),
+        "bad" to uiText(R.string.ui_141, "Result was wrong"),
+        "good" to uiText(R.string.ui_142, "Result was helpful"),
+        "other" to uiText(R.string.ui_143, "Other"),
     )
     var classification by remember { mutableStateOf("bug") }
     var reason by remember { mutableStateOf("") }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Outlined.ErrorOutline, contentDescription = null) },
-        title = { Text("Send feedback") },
+        title = { Text(uiText(R.string.ui_144, "Send feedback")) },
         text = {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
                 classifications.forEach { (value, label) ->
@@ -2922,7 +2977,7 @@ private fun FeedbackDialog(
                     value = reason,
                     onValueChange = { reason = it },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Details") },
+                    label = { Text(uiText(R.string.ui_145, "Details")) },
                     minLines = 3,
                     maxLines = 6,
                 )
@@ -2934,10 +2989,10 @@ private fun FeedbackDialog(
         },
         confirmButton = {
             Button(onClick = { onSubmit(classification, reason) }, enabled = !isSubmitting) {
-                Text("Send")
+                Text(uiText(R.string.ui_146, "Send"))
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_037, "Cancel")) } },
     )
 }
 
@@ -2950,20 +3005,20 @@ private fun McpStatusDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("MCP servers") },
+        title = { Text(uiText(R.string.ui_147, "MCP servers")) },
         text = {
             Column(Modifier.fillMaxWidth().heightIn(max = 420.dp).verticalScroll(rememberScrollState())) {
                 when {
                     state.isMcpStatusLoading -> Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(10.dp))
-                        Text("Loading remote MCP status…")
+                        Text(uiText(R.string.ui_148, "Loading remote MCP status…"))
                     }
                     !state.mcpStatusError.isNullOrBlank() -> Text(
                         state.mcpStatusError,
                         color = MaterialTheme.colorScheme.error,
                     )
-                    state.mcpServers.isEmpty() -> Text("No MCP servers configured")
+                    state.mcpServers.isEmpty() -> Text(uiText(R.string.ui_149, "No MCP servers configured"))
                     else -> state.mcpServers.forEachIndexed { index, server ->
                         if (index > 0) HorizontalDivider(Modifier.padding(vertical = 8.dp))
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -2984,7 +3039,7 @@ private fun McpStatusDialog(
                                 ) {
                                     Icon(Icons.Outlined.Key, contentDescription = null, modifier = Modifier.size(16.dp))
                                     Spacer(Modifier.width(5.dp))
-                                    Text("Sign in")
+                                    Text(uiText(R.string.ui_150, "Sign in"))
                                 }
                             } else {
                                 Text(
@@ -2999,13 +3054,13 @@ private fun McpStatusDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Close") }
+            TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_151, "Close")) }
         },
         dismissButton = {
             TextButton(onClick = onRefresh, enabled = !state.isMcpStatusLoading && !state.isMcpLoginStarting) {
                 Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(5.dp))
-                Text("Reload")
+                Text(uiText(R.string.ui_152, "Reload"))
             }
         },
     )
@@ -3028,19 +3083,19 @@ private fun ArchivedTasksDialog(
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Archived tasks") },
+        title = { Text(uiText(R.string.ui_053, "Archived tasks")) },
         text = {
             Column(Modifier.fillMaxWidth()) {
                 OutlinedTextField(
                     value = searchQuery,
                     onValueChange = { searchQuery = it },
                     modifier = Modifier.fillMaxWidth(),
-                    placeholder = { Text("Search archived tasks") },
+                    placeholder = { Text(uiText(R.string.ui_153, "Search archived tasks")) },
                     leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
                     trailingIcon = {
                         if (searchQuery.isNotEmpty()) {
                             IconButton(onClick = { searchQuery = "" }) {
-                                Icon(Icons.Outlined.Close, contentDescription = "Clear search")
+                                Icon(Icons.Outlined.Close, contentDescription = uiText(R.string.ui_055, "Clear search"))
                             }
                         }
                     },
@@ -3054,7 +3109,7 @@ private fun ArchivedTasksDialog(
                     ) {
                         CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(10.dp))
-                        Text("Loading archived tasks…")
+                        Text(uiText(R.string.ui_154, "Loading archived tasks…"))
                     }
                     !state.archivedThreadsError.isNullOrBlank() -> Text(
                         state.archivedThreadsError,
@@ -3062,7 +3117,7 @@ private fun ArchivedTasksDialog(
                         color = MaterialTheme.colorScheme.error,
                     )
                     filteredThreads.isEmpty() -> Text(
-                        if (searchQuery.isBlank()) "No archived tasks" else "No matching archived tasks",
+                        if (searchQuery.isBlank()) uiText(R.string.ui_155, "No archived tasks") else uiText(R.string.ui_156, "No matching archived tasks"),
                         modifier = Modifier.padding(vertical = 16.dp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -3092,12 +3147,12 @@ private fun ArchivedTasksDialog(
                                     )
                                 }
                                 IconButton(onClick = { onUnarchive(thread) }) {
-                                    Icon(Icons.Outlined.Unarchive, contentDescription = "Restore task")
+                                    Icon(Icons.Outlined.Unarchive, contentDescription = uiText(R.string.ui_157, "Restore task"))
                                 }
                                 IconButton(onClick = { onDelete(thread) }) {
                                     Icon(
                                         Icons.Outlined.DeleteOutline,
-                                        contentDescription = "Delete task permanently",
+                                        contentDescription = uiText(R.string.ui_158, "Delete task permanently"),
                                         tint = MaterialTheme.colorScheme.error,
                                     )
                                 }
@@ -3108,12 +3163,12 @@ private fun ArchivedTasksDialog(
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_151, "Close")) } },
         dismissButton = {
             TextButton(onClick = onRefresh, enabled = !state.isArchivedThreadsLoading) {
                 Icon(Icons.Outlined.Refresh, contentDescription = null, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(5.dp))
-                Text("Refresh")
+                Text(uiText(R.string.ui_159, "Refresh"))
             }
         },
     )
@@ -3128,16 +3183,16 @@ private fun DeleteArchivedThreadDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Outlined.DeleteOutline, contentDescription = null) },
-        title = { Text("Delete task permanently?") },
-        text = { Text("${thread.title}\n\nThis removes the remote Codex history and cannot be undone.") },
+        title = { Text(uiText(R.string.ui_160, "Delete task permanently?")) },
+        text = { Text(uiText(R.string.delete_remote_task, "%1\$s\n\nThis removes the remote Codex history and cannot be undone.", thread.title)) },
         confirmButton = {
             Button(onClick = onDelete) {
                 Icon(Icons.Outlined.DeleteOutline, contentDescription = null, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Delete")
+                Text(uiText(R.string.ui_161, "Delete"))
             }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_037, "Cancel")) } },
     )
 }
 
@@ -3151,28 +3206,28 @@ private fun RemoteStatusDialog(state: AppUiState, onDismiss: () -> Unit) {
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Remote status") },
+        title = { Text(uiText(R.string.ui_162, "Remote status")) },
         text = {
             Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-                StatusLine("Task ID", state.selectedThreadId ?: "New task", monospace = true)
-                StatusLine("Codex", state.remoteServer?.codexVersion?.ifBlank { "Unknown" } ?: "Unknown")
-                StatusLine("Model", state.selectedModel ?: "Unknown")
+                StatusLine(uiText(R.string.ui_163, "Task ID"), state.selectedThreadId ?: uiText(R.string.ui_052, "New task"), monospace = true)
+                StatusLine("Codex", state.remoteServer?.codexVersion?.ifBlank { uiText(R.string.ui_164, "Unknown") } ?: uiText(R.string.ui_164, "Unknown"))
+                StatusLine(uiText(R.string.ui_165, "Model"), state.selectedModel ?: uiText(R.string.ui_164, "Unknown"))
                 StatusLine(
-                    "Context",
+                    uiText(R.string.ui_166, "Context"),
                     contextPercent?.let { "${it.toInt().coerceIn(0, 100)}% · ${usage?.totalTokens ?: 0} tokens" }
-                        ?: "Waiting for usage data",
+                        ?: uiText(R.string.ui_167, "Waiting for usage data"),
                 )
                 if (state.isStatusLoading) {
                     Spacer(Modifier.height(12.dp))
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                 } else {
                     state.rateLimits?.let { limits ->
-                        limits.planType?.let { StatusLine("Plan", it) }
-                        limits.primary?.let { StatusLine("Primary limit", it.displayRateLimit()) }
-                        limits.secondary?.let { StatusLine("Secondary limit", it.displayRateLimit()) }
+                        limits.planType?.let { StatusLine(uiText(R.string.ui_091, "Plan"), it) }
+                        limits.primary?.let { StatusLine(uiText(R.string.ui_168, "Primary limit"), it.displayRateLimit()) }
+                        limits.secondary?.let { StatusLine(uiText(R.string.ui_169, "Secondary limit"), it.displayRateLimit()) }
                         when {
-                            limits.creditsUnlimited -> StatusLine("Credits", "Unlimited")
-                            !limits.creditsBalance.isNullOrBlank() -> StatusLine("Credits", limits.creditsBalance)
+                            limits.creditsUnlimited -> StatusLine(uiText(R.string.ui_170, "Credits"), uiText(R.string.ui_171, "Unlimited"))
+                            !limits.creditsBalance.isNullOrBlank() -> StatusLine(uiText(R.string.ui_170, "Credits"), limits.creditsBalance)
                         }
                     }
                     state.statusError?.let {
@@ -3182,7 +3237,7 @@ private fun RemoteStatusDialog(state: AppUiState, onDismiss: () -> Unit) {
                 }
             }
         },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+        confirmButton = { TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_151, "Close")) } },
     )
 }
 
@@ -3206,11 +3261,11 @@ private fun StatusLine(label: String, value: String, monospace: Boolean = false)
 }
 
 private fun String.displayMcpAuthStatus(): String = when (this) {
-    "notLoggedIn" -> "Not authenticated"
-    "bearerToken" -> "API key"
-    "oAuth" -> "OAuth"
-    "unsupported" -> "No auth"
-    else -> ifBlank { "Unknown" }
+    "notLoggedIn" -> uiText(R.string.ui_172, "Not authenticated")
+    "bearerToken" -> uiText(R.string.ui_173, "API key")
+    "oAuth" -> uiText(R.string.ui_174, "OAuth")
+    "unsupported" -> uiText(R.string.ui_175, "No auth")
+    else -> ifBlank { uiText(R.string.ui_164, "Unknown") }
 }
 
 private fun com.codex.remote.domain.RateLimitWindowSnapshot.displayRateLimit(): String {
@@ -3231,12 +3286,12 @@ private fun ThreadGoalStatus.goalStatusColor(): Color = when (this) {
 }
 
 private fun ThreadGoalStatus.displayGoalStatus(): String = when (this) {
-    ThreadGoalStatus.ACTIVE -> "Active"
-    ThreadGoalStatus.PAUSED -> "Paused"
-    ThreadGoalStatus.BLOCKED -> "Blocked"
-    ThreadGoalStatus.USAGE_LIMITED -> "Usage limited"
-    ThreadGoalStatus.BUDGET_LIMITED -> "Budget limited"
-    ThreadGoalStatus.COMPLETE -> "Complete"
+    ThreadGoalStatus.ACTIVE -> uiText(R.string.ui_176, "Active")
+    ThreadGoalStatus.PAUSED -> uiText(R.string.ui_177, "Paused")
+    ThreadGoalStatus.BLOCKED -> uiText(R.string.ui_178, "Blocked")
+    ThreadGoalStatus.USAGE_LIMITED -> uiText(R.string.ui_179, "Usage limited")
+    ThreadGoalStatus.BUDGET_LIMITED -> uiText(R.string.ui_180, "Budget limited")
+    ThreadGoalStatus.COMPLETE -> uiText(R.string.ui_181, "Complete")
 }
 
 private val builtInPermissionProfiles = setOf(":workspace", ":danger-full-access", ":read-only")
@@ -3258,11 +3313,11 @@ internal fun permissionModeFor(
 private fun permissionModeLabel(state: AppUiState): String = when (
     permissionModeFor(state.selectedPermissionProfile, state.approvalPolicy, state.approvalsReviewer)
 ) {
-    PermissionMode.ASK -> "询问"
-    PermissionMode.AUTO_REVIEW -> "替我审批"
-    PermissionMode.FULL_ACCESS -> "完全访问"
-    PermissionMode.READ_ONLY -> "只读"
-    null -> state.selectedPermissionProfile?.removePrefix(":") ?: "询问"
+    PermissionMode.ASK -> uiText(R.string.ui_182, "询问")
+    PermissionMode.AUTO_REVIEW -> uiText(R.string.ui_183, "替我审批")
+    PermissionMode.FULL_ACCESS -> uiText(R.string.ui_184, "完全访问")
+    PermissionMode.READ_ONLY -> uiText(R.string.ui_185, "只读")
+    null -> state.selectedPermissionProfile?.removePrefix(":") ?: uiText(R.string.ui_182, "询问")
 }
 
 @Composable
@@ -3286,26 +3341,26 @@ private fun PermissionDropdown(
         properties = properties,
     ) {
         PermissionDropdownItem(
-            title = "询问",
-            description = "需要执行命令或修改文件时询问",
+            title = uiText(R.string.ui_182, "询问"),
+            description = uiText(R.string.ui_186, "需要执行命令或修改文件时询问"),
             selected = selectedMode == PermissionMode.ASK,
             onClick = { onSetPermissionMode(PermissionMode.ASK) },
         )
         PermissionDropdownItem(
-            title = "替我审批",
-            description = "由 Codex 自动审查需要批准的操作",
+            title = uiText(R.string.ui_183, "替我审批"),
+            description = uiText(R.string.ui_187, "由 Codex 自动审查需要批准的操作"),
             selected = selectedMode == PermissionMode.AUTO_REVIEW,
             onClick = { onSetPermissionMode(PermissionMode.AUTO_REVIEW) },
         )
         PermissionDropdownItem(
-            title = "完全访问",
-            description = "无需询问即可访问远端工作区和网络",
+            title = uiText(R.string.ui_184, "完全访问"),
+            description = uiText(R.string.ui_188, "无需询问即可访问远端工作区和网络"),
             selected = selectedMode == PermissionMode.FULL_ACCESS,
             onClick = { onSetPermissionMode(PermissionMode.FULL_ACCESS) },
         )
         PermissionDropdownItem(
-            title = "只读",
-            description = "允许读取，但不允许修改远端文件",
+            title = uiText(R.string.ui_185, "只读"),
+            description = uiText(R.string.ui_189, "允许读取，但不允许修改远端文件"),
             selected = selectedMode == PermissionMode.READ_ONLY,
             onClick = { onSetPermissionMode(PermissionMode.READ_ONLY) },
         )
@@ -3375,7 +3430,7 @@ private fun ContextUsageRing(
     IconButton(
         onClick = onClick,
         modifier = modifier.size(32.dp).semantics {
-            contentDescription = if (usage == null) "上下文用量尚不可用" else "上下文已使用 $percent%"
+            contentDescription = if (usage == null) uiText(R.string.ui_190, "上下文用量尚不可用") else uiText(R.string.context_percent, "上下文已使用 %1\$d%%", percent)
         },
     ) {
         Canvas(Modifier.size(21.dp)) {
@@ -3424,14 +3479,14 @@ private fun ModelSettingsDropdown(
         when (page) {
             ModelSettingsPage.ROOT -> {
                 ModelSettingsNavigationRow(
-                    label = "模型",
-                    value = selectedModel?.displayName ?: "未选择",
+                    label = uiText(R.string.ui_191, "模型"),
+                    value = selectedModel?.displayName ?: uiText(R.string.ui_192, "未选择"),
                     enabled = state.models.isNotEmpty(),
                     onClick = { onPageChange(ModelSettingsPage.MODEL) },
                 )
                 ModelSettingsNavigationRow(
-                    label = "推理强度",
-                    value = state.selectedReasoningEffort?.displayEffort() ?: "默认",
+                    label = uiText(R.string.ui_193, "推理强度"),
+                    value = state.selectedReasoningEffort?.displayEffort() ?: uiText(R.string.ui_194, "默认"),
                     enabled = selectedModel?.supportedReasoningEfforts?.isNotEmpty() == true,
                     onClick = { onPageChange(ModelSettingsPage.REASONING) },
                 )
@@ -3441,9 +3496,9 @@ private fun ModelSettingsDropdown(
                         DropdownMenuItem(
                             text = {
                                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                    Text("Fast", modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
+                                    Text(uiText(R.string.ui_195, "Fast"), modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
                                     Text(
-                                        if (state.selectedServiceTier == fastTier.id) "开启" else "关闭",
+                                        if (state.selectedServiceTier == fastTier.id) uiText(R.string.ui_196, "开启") else uiText(R.string.ui_017, "关闭"),
                                         style = MaterialTheme.typography.bodyMedium,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -3461,15 +3516,15 @@ private fun ModelSettingsDropdown(
                         )
                     } else {
                         ModelSettingsNavigationRow(
-                            label = "速度",
-                            value = selectedTier?.name ?: "标准",
+                            label = uiText(R.string.ui_197, "速度"),
+                            value = selectedTier?.name ?: uiText(R.string.ui_198, "标准"),
                             onClick = { onPageChange(ModelSettingsPage.SERVICE_TIER) },
                         )
                     }
                 }
             }
             ModelSettingsPage.MODEL -> {
-                ModelSettingsBackRow("模型") { onPageChange(ModelSettingsPage.ROOT) }
+                ModelSettingsBackRow(uiText(R.string.ui_191, "模型")) { onPageChange(ModelSettingsPage.ROOT) }
                 state.models.forEach { model ->
                     DropdownMenuItem(
                         text = {
@@ -3497,7 +3552,7 @@ private fun ModelSettingsDropdown(
                 }
             }
             ModelSettingsPage.REASONING -> {
-                ModelSettingsBackRow("推理强度") { onPageChange(ModelSettingsPage.ROOT) }
+                ModelSettingsBackRow(uiText(R.string.ui_193, "推理强度")) { onPageChange(ModelSettingsPage.ROOT) }
                 selectedModel?.supportedReasoningEfforts.orEmpty().forEach { effort ->
                     DropdownMenuItem(
                         text = {
@@ -3527,9 +3582,9 @@ private fun ModelSettingsDropdown(
                 }
             }
             ModelSettingsPage.SERVICE_TIER -> {
-                ModelSettingsBackRow("速度") { onPageChange(ModelSettingsPage.ROOT) }
+                ModelSettingsBackRow(uiText(R.string.ui_197, "速度")) { onPageChange(ModelSettingsPage.ROOT) }
                 DropdownMenuItem(
-                    text = { Text("标准") },
+                    text = { Text(uiText(R.string.ui_198, "标准")) },
                     onClick = {
                         onSetServiceTier(null)
                         onPageChange(ModelSettingsPage.ROOT)
@@ -3599,7 +3654,7 @@ private fun ModelSettingsNavigationRow(
 private fun ModelSettingsBackRow(title: String, onClick: () -> Unit) {
     DropdownMenuItem(
         text = { Text(title, style = MaterialTheme.typography.labelLarge) },
-        leadingIcon = { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "返回") },
+        leadingIcon = { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = uiText(R.string.ui_199, "返回")) },
         onClick = onClick,
     )
     HorizontalDivider(Modifier.padding(horizontal = 12.dp))
@@ -3610,7 +3665,7 @@ internal fun modelSettingsSummary(
     effort: String?,
     serviceTier: String?,
 ): String = listOfNotNull(
-    modelId?.removePrefix("gpt-")?.removePrefix("GPT-") ?: "模型",
+    modelId?.removePrefix("gpt-")?.removePrefix("GPT-") ?: uiText(R.string.ui_191, "模型"),
     effort?.displayEffort(),
     serviceTier?.takeUnless { it.equals("standard", ignoreCase = true) },
 ).joinToString(" · ")
@@ -3627,7 +3682,7 @@ private fun CompactComposerMenuButton(
 ) {
     Row(
         modifier = modifier.height(32.dp)
-            .clip(RoundedCornerShape(5.dp))
+            .clip(RoundedCornerShape(20.dp))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -3658,20 +3713,20 @@ private fun GoalModeIndicator(
 ) {
     Row(
         modifier = modifier.height(32.dp)
-            .clip(RoundedCornerShape(5.dp))
+            .clip(RoundedCornerShape(20.dp))
             .clickable(onClick = onClear)
             .padding(horizontal = 7.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             Icons.Outlined.Flag,
-            contentDescription = "取消目标标记",
+            contentDescription = uiText(R.string.ui_200, "取消目标标记"),
             modifier = Modifier.size(15.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Spacer(Modifier.width(5.dp))
         Text(
-            "目标",
+            uiText(R.string.ui_119, "目标"),
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -3711,25 +3766,25 @@ private data class ComposerMentionOption(
 )
 
 internal fun desktopSlashCommands(hasThread: Boolean): List<SlashCommand> = buildList {
-    add(SlashCommand("model", "Choose the model for this task", Icons.Outlined.SmartToy, SlashCommandAction.MODEL))
-    add(SlashCommand("reasoning", "Set reasoning effort", Icons.Outlined.Psychology, SlashCommandAction.REASONING))
-    add(SlashCommand("plan", "Switch this task to Plan mode", Icons.Outlined.Flag, SlashCommandAction.PLAN_MODE))
-    add(SlashCommand("permissions", "Change approval behavior", Icons.Outlined.Tune, SlashCommandAction.PERMISSIONS))
-    add(SlashCommand("skills", "Mention a remote skill", Icons.Outlined.Psychology, SlashCommandAction.SKILLS))
-    add(SlashCommand("plugins", "Mention an installed remote plugin", Icons.Outlined.Extension, SlashCommandAction.PLUGINS))
-    add(SlashCommand("goal", "Set the next message as this task's goal", Icons.Outlined.Flag, SlashCommandAction.GOAL))
-    add(SlashCommand("init", "Create AGENTS.md instructions for this project", Icons.Outlined.Description, SlashCommandAction.INIT))
-    add(SlashCommand("mcp", "Show remote MCP server status", Icons.Outlined.Hub, SlashCommandAction.MCP))
-    add(SlashCommand("feedback", "Send feedback about this task", Icons.Outlined.ErrorOutline, SlashCommandAction.FEEDBACK))
-    add(SlashCommand("compact", "Compact this task's context", Icons.Outlined.Description, SlashCommandAction.COMPACT))
+    add(SlashCommand("model", uiText(R.string.ui_201, "Choose the model for this task"), Icons.Outlined.SmartToy, SlashCommandAction.MODEL))
+    add(SlashCommand("reasoning", uiText(R.string.ui_202, "Set reasoning effort"), Icons.Outlined.Psychology, SlashCommandAction.REASONING))
+    add(SlashCommand("plan", uiText(R.string.ui_203, "Switch this task to Plan mode"), Icons.Outlined.Flag, SlashCommandAction.PLAN_MODE))
+    add(SlashCommand("permissions", uiText(R.string.ui_204, "Change approval behavior"), Icons.Outlined.Tune, SlashCommandAction.PERMISSIONS))
+    add(SlashCommand("skills", uiText(R.string.ui_205, "Mention a remote skill"), Icons.Outlined.Psychology, SlashCommandAction.SKILLS))
+    add(SlashCommand("plugins", uiText(R.string.ui_206, "Mention an installed remote plugin"), Icons.Outlined.Extension, SlashCommandAction.PLUGINS))
+    add(SlashCommand("goal", uiText(R.string.ui_207, "Set the next message as this task's goal"), Icons.Outlined.Flag, SlashCommandAction.GOAL))
+    add(SlashCommand("init", uiText(R.string.ui_208, "Create AGENTS.md instructions for this project"), Icons.Outlined.Description, SlashCommandAction.INIT))
+    add(SlashCommand("mcp", uiText(R.string.ui_209, "Show remote MCP server status"), Icons.Outlined.Hub, SlashCommandAction.MCP))
+    add(SlashCommand("feedback", uiText(R.string.ui_210, "Send feedback about this task"), Icons.Outlined.ErrorOutline, SlashCommandAction.FEEDBACK))
+    add(SlashCommand("compact", uiText(R.string.ui_211, "Compact this task's context"), Icons.Outlined.Description, SlashCommandAction.COMPACT))
     if (hasThread) {
-        add(SlashCommand("rename", "Rename the current task", Icons.Outlined.Edit, SlashCommandAction.RENAME))
-        add(SlashCommand("archive", "Archive the current task", Icons.Outlined.Archive, SlashCommandAction.ARCHIVE))
-        add(SlashCommand("fork", "Continue in a new task", Icons.AutoMirrored.Outlined.CallSplit, SlashCommandAction.FORK))
-        add(SlashCommand("review-mode", "Review uncommitted changes or another target", Icons.Outlined.Code, SlashCommandAction.REVIEW))
+        add(SlashCommand("rename", uiText(R.string.ui_212, "Rename the current task"), Icons.Outlined.Edit, SlashCommandAction.RENAME))
+        add(SlashCommand("archive", uiText(R.string.ui_213, "Archive the current task"), Icons.Outlined.Archive, SlashCommandAction.ARCHIVE))
+        add(SlashCommand("fork", uiText(R.string.ui_214, "Continue in a new task"), Icons.AutoMirrored.Outlined.CallSplit, SlashCommandAction.FORK))
+        add(SlashCommand("review-mode", uiText(R.string.ui_215, "Review uncommitted changes or another target"), Icons.Outlined.Code, SlashCommandAction.REVIEW))
     }
-    add(SlashCommand("new", "Start a new task in this project", Icons.Outlined.Add, SlashCommandAction.NEW_TASK))
-    add(SlashCommand("status", "Show remote Codex connection status", Icons.Outlined.Computer, SlashCommandAction.STATUS))
+    add(SlashCommand("new", uiText(R.string.ui_216, "Start a new task in this project"), Icons.Outlined.Add, SlashCommandAction.NEW_TASK))
+    add(SlashCommand("status", uiText(R.string.ui_217, "Show remote Codex connection status"), Icons.Outlined.Computer, SlashCommandAction.STATUS))
 }
 
 @Composable
@@ -3745,7 +3800,7 @@ private fun ComposerSuggestionPopup(
 ) {
     Surface(
         modifier = Modifier.fillMaxWidth().widthIn(max = 836.dp).padding(horizontal = 12.dp),
-        shape = RoundedCornerShape(7.dp),
+        shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
         shadowElevation = 5.dp,
@@ -3755,7 +3810,7 @@ private fun ComposerSuggestionPopup(
             contentPadding = PaddingValues(vertical = 6.dp),
         ) {
             if (triggerKind == ComposerTriggerKind.SLASH_COMMAND) {
-                if (slashCommands.isEmpty()) item { ComposerPopupMessage("No commands found") }
+                if (slashCommands.isEmpty()) item { ComposerPopupMessage(uiText(R.string.ui_218, "No commands found")) }
                 items(slashCommands, key = { "slash-${it.name}" }) { command ->
                     ComposerPopupRow(
                         icon = command.icon,
@@ -3768,8 +3823,8 @@ private fun ComposerSuggestionPopup(
                 item {
                     Text(
                         when (mentionKindFilter) {
-                            ComposerMentionKind.SKILL -> "SKILLS"
-                            ComposerMentionKind.PLUGIN -> "PLUGINS"
+                            ComposerMentionKind.SKILL -> uiText(R.string.ui_219, "SKILLS")
+                            ComposerMentionKind.PLUGIN -> uiText(R.string.ui_220, "PLUGINS")
                             null -> "SKILLS & PLUGINS"
                         },
                         modifier = Modifier.padding(horizontal = 13.dp, vertical = 6.dp),
@@ -3791,9 +3846,9 @@ private fun ComposerSuggestionPopup(
                     item {
                         ComposerPopupMessage(
                             when {
-                                loading -> "Loading from remote Codex…"
+                                loading -> uiText(R.string.ui_221, "Loading from remote Codex…")
                                 !error.isNullOrBlank() -> error
-                                else -> "No matching remote skills or installed plugins"
+                                else -> uiText(R.string.ui_222, "No matching remote skills or installed plugins")
                             },
                         )
                     }
@@ -3853,10 +3908,10 @@ private fun RemoteAuthenticationState(
         ) {
             Icon(Icons.Outlined.Key, contentDescription = null, modifier = Modifier.size(34.dp))
             Spacer(Modifier.height(16.dp))
-            Text("Sign in to remote Codex", style = MaterialTheme.typography.titleLarge)
+            Text(uiText(R.string.ui_223, "Sign in to remote Codex"), style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(6.dp))
             Text(
-                "SSH 已连接，但远端 Codex 没有可用账号。登录会发生在远端主机，完成后会自动加载模型。",
+                uiText(R.string.ui_224, "SSH 已连接，但远端 Codex 没有可用账号。登录会发生在远端主机，完成后会自动加载模型。"),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -3866,7 +3921,7 @@ private fun RemoteAuthenticationState(
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(8.dp))
                 }
-                Text(if (loading) "Starting sign-in" else "Sign in with ChatGPT")
+                Text(if (loading) uiText(R.string.ui_225, "Starting sign-in") else uiText(R.string.ui_226, "Sign in with ChatGPT"))
             }
         }
     }
@@ -3891,7 +3946,7 @@ private fun ConnectionState(
             Text(detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (action != null) {
                 Spacer(Modifier.height(18.dp))
-                OutlinedButton(onClick = action) { Text("Connections") }
+                OutlinedButton(onClick = action) { Text(uiText(R.string.ui_227, "Connections")) }
             }
         }
     }
@@ -3930,7 +3985,7 @@ private fun ApprovalDialog(
                         question.options.forEach { option ->
                             val selected = answers[question.id] == option
                             Row(
-                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(5.dp))
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
                                     .selectable(selected = selected, onClick = { answers[question.id] = option })
                                     .background(if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
                                     .padding(10.dp),
@@ -3945,12 +4000,12 @@ private fun ApprovalDialog(
                         OutlinedTextField(
                             value = answers[question.id].orEmpty(),
                             onValueChange = { answers[question.id] = it },
-                            label = { Text("Response") },
+                            label = { Text(uiText(R.string.ui_228, "Response")) },
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
                 } else {
-                    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(5.dp)) {
+                    Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(20.dp)) {
                         SelectionContainer {
                             Text(approval.detail, Modifier.fillMaxWidth().padding(10.dp), style = MonoText)
                         }
@@ -3962,14 +4017,14 @@ private fun ApprovalDialog(
             Button(onClick = {
                 onDecision("accept", answers.mapValues { listOf(it.value) })
             }, enabled = approval.kind != ApprovalKind.USER_INPUT || answers.values.all { it.isNotBlank() }) {
-                Text(if (approval.kind == ApprovalKind.USER_INPUT) "Send" else "Allow once")
+                Text(if (approval.kind == ApprovalKind.USER_INPUT) uiText(R.string.ui_146, "Send") else uiText(R.string.ui_229, "Allow once"))
             }
         },
         dismissButton = {
             Row {
-                TextButton(onClick = { onDecision("decline", emptyMap()) }) { Text("Deny") }
+                TextButton(onClick = { onDecision("decline", emptyMap()) }) { Text(uiText(R.string.ui_230, "Deny")) }
                 if (approval.kind == ApprovalKind.COMMAND || approval.kind == ApprovalKind.FILE_CHANGE) {
-                    TextButton(onClick = { onDecision("acceptForSession", emptyMap()) }) { Text("Allow session") }
+                    TextButton(onClick = { onDecision("acceptForSession", emptyMap()) }) { Text(uiText(R.string.ui_231, "Allow session")) }
                 }
             }
         },
@@ -3986,20 +4041,20 @@ private fun RenameThreadDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
-        title = { Text("Rename task") },
+        title = { Text(uiText(R.string.ui_232, "Rename task")) },
         text = {
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
                 modifier = Modifier.fillMaxWidth(),
                 singleLine = true,
-                label = { Text("Task name") },
+                label = { Text(uiText(R.string.ui_233, "Task name")) },
             )
         },
         confirmButton = {
-            Button(onClick = { onRename(name.trim()) }, enabled = name.isNotBlank()) { Text("Save") }
+            Button(onClick = { onRename(name.trim()) }, enabled = name.isNotBlank()) { Text(uiText(R.string.ui_038, "Save")) }
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_037, "Cancel")) } },
     )
 }
 
@@ -4012,12 +4067,12 @@ private fun ArchiveThreadDialog(
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
-        title = { Text("Archive task?") },
+        title = { Text(uiText(R.string.ui_234, "Archive task?")) },
         text = {
-            Text("${thread.title} will be removed from Projects. Its remote Codex history is preserved in the archive.")
+            Text(uiText(R.string.archive_remote_task, "%1\$s will be archived. Remote history is kept.", thread.title))
         },
-        confirmButton = { Button(onClick = onArchive) { Text("Archive") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        confirmButton = { Button(onClick = onArchive) { Text(uiText(R.string.ui_072, "Archive")) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_037, "Cancel")) } },
     )
 }
 
@@ -4030,11 +4085,11 @@ private fun RemoteDeviceLoginDialog(
     AlertDialog(
         onDismissRequest = onCancel,
         icon = { Icon(Icons.Outlined.Key, contentDescription = null) },
-        title = { Text("Sign in to remote Codex") },
+        title = { Text(uiText(R.string.ui_223, "Sign in to remote Codex")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("在浏览器中打开登录页并输入设备码。完成后此窗口会自动关闭。")
-                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(5.dp)) {
+                Text(uiText(R.string.ui_235, "在浏览器中打开登录页并输入设备码。完成后此窗口会自动关闭。"))
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(20.dp)) {
                     SelectionContainer {
                         Text(
                             login.userCode,
@@ -4052,8 +4107,8 @@ private fun RemoteDeviceLoginDialog(
                 }
             }
         },
-        confirmButton = { Button(onClick = onOpen) { Text("Open sign-in page") } },
-        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
+        confirmButton = { Button(onClick = onOpen) { Text(uiText(R.string.ui_236, "Open sign-in page")) } },
+        dismissButton = { TextButton(onClick = onCancel) { Text(uiText(R.string.ui_037, "Cancel")) } },
     )
 }
 
@@ -4067,24 +4122,24 @@ private fun HostKeyConfirmationDialog(
     AlertDialog(
         onDismissRequest = {},
         icon = { Icon(Icons.Outlined.Key, contentDescription = null) },
-        title = { Text("Verify SSH host") },
+        title = { Text(uiText(R.string.ui_237, "Verify SSH host")) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(host, style = MaterialTheme.typography.titleMedium)
-                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(5.dp)) {
+                Surface(color = MaterialTheme.colorScheme.surfaceVariant, shape = RoundedCornerShape(20.dp)) {
                     SelectionContainer {
                         Text(fingerprint, Modifier.fillMaxWidth().padding(12.dp), style = MonoText)
                     }
                 }
                 Text(
-                    "请与服务器管理员或 ssh-keygen 输出核对此指纹。确认前不会发送登录凭据。",
+                    uiText(R.string.ui_238, "请与服务器管理员或 ssh-keygen 输出核对此指纹。确认前不会发送登录凭据。"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         },
-        confirmButton = { Button(onClick = onTrust) { Text("Trust & connect") } },
-        dismissButton = { TextButton(onClick = onReject) { Text("Cancel") } },
+        confirmButton = { Button(onClick = onTrust) { Text(uiText(R.string.ui_346, "Trust & connect")) } },
+        dismissButton = { TextButton(onClick = onReject) { Text(uiText(R.string.ui_037, "Cancel")) } },
     )
 }
 
@@ -4094,14 +4149,14 @@ private fun formatThreadTime(epochSeconds: Long): String {
 }
 
 private fun String.displayEffort(): String = when (lowercase()) {
-    "none" -> "无"
-    "minimal" -> "最低"
-    "low" -> "低"
-    "medium" -> "中"
-    "high" -> "高"
-    "xhigh" -> "很高"
-    "ultra" -> "极高"
-    "max" -> "最高"
+    "none" -> uiText(R.string.ui_239, "无")
+    "minimal" -> uiText(R.string.ui_240, "最低")
+    "low" -> uiText(R.string.ui_241, "低")
+    "medium" -> uiText(R.string.ui_242, "中")
+    "high" -> uiText(R.string.ui_243, "高")
+    "xhigh" -> uiText(R.string.ui_244, "很高")
+    "ultra" -> uiText(R.string.ui_245, "极高")
+    "max" -> uiText(R.string.ui_246, "最高")
     else -> replaceFirstChar { character ->
         if (character.isLowerCase()) character.titlecase() else character.toString()
     }
@@ -4110,7 +4165,7 @@ private fun String.displayEffort(): String = when (lowercase()) {
 private fun readComposerImageAttachment(context: Context, uri: Uri): ComposerImageAttachment {
     val resolver = context.contentResolver
     val mimeType = resolver.getType(uri)?.takeIf { it.startsWith("image/") }
-        ?: throw IllegalArgumentException("Only image attachments are supported")
+        ?: throw IllegalArgumentException(uiText(R.string.ui_247, "Only image attachments are supported"))
     var displayName = "image"
     var declaredSize: Long? = null
     resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
@@ -4122,11 +4177,11 @@ private fun readComposerImageAttachment(context: Context, uri: Uri): ComposerIma
         }
     }
     if (declaredSize != null && declaredSize!! > MAX_COMPOSER_IMAGE_BYTES) {
-        throw IllegalArgumentException("Image must be 20 MB or smaller")
+        throw IllegalArgumentException(uiText(R.string.ui_248, "Image must be 20 MB or smaller"))
     }
     val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
-        ?: throw IllegalArgumentException("Unable to read selected image")
-    if (bytes.size > MAX_COMPOSER_IMAGE_BYTES) throw IllegalArgumentException("Image must be 20 MB or smaller")
+        ?: throw IllegalArgumentException(uiText(R.string.ui_249, "Unable to read selected image"))
+    if (bytes.size > MAX_COMPOSER_IMAGE_BYTES) throw IllegalArgumentException(uiText(R.string.ui_248, "Image must be 20 MB or smaller"))
     return ComposerImageAttachment(
         displayName = displayName,
         mimeType = mimeType,

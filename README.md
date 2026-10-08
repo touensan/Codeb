@@ -1,5 +1,10 @@
 # Codex Remote for Android
 
+本 fork 新增中文/英语/日语、手机本地聊天与工作空间、OpenAI 兼容 API、
+远程历史缓存、活动视图及开发者诊断接口。功能、存储规则及实际限制见
+[`docs/LOCAL_CLIENT.md`](docs/LOCAL_CLIENT.md)。服务器仍只需 SSH 和官方 Codex。
+开发版与原 App 并存；此分支改造版请自行构建，下面上游 Release 不是本分支的新 APK。
+
 [![Android CI](https://github.com/liuaho6-commits/codex-remote-android/actions/workflows/android.yml/badge.svg)](https://github.com/liuaho6-commits/codex-remote-android/actions/workflows/android.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
