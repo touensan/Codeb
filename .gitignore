@@ -3,6 +3,8 @@
 /.kotlin/
 /.tooling/
 /local.properties
+# Local conversation memory stays on this machine.
+/ai_codex.md
 /*-qa.png
 **/build/
 **/__pycache__/
