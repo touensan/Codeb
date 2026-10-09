@@ -69,6 +69,20 @@ class ThreadHistoryPaginationTest {
         val timeline = CodexRpcClient.parseTurnsTimeline(turns)
 
         assertEquals(listOf("old", "new"), timeline.map { it.id })
+        assertEquals(listOf("turn-old", "turn-new"), timeline.map { it.turnId })
+        assertTrue(timeline.all { it.elapsedMs == null && it.completedAt == null })
+    }
+
+    @Test fun historicalTimingUsesProvidedMillisecondsAndSecondsWithoutGuessing() {
+        val turns = json.parseToJsonElement("""[
+            {"id":"complete","durationMs":1234,"completedAt":1700000000,"items":[{"type":"agentMessage","id":"a","text":"done"}]},
+            {"id":"unknown","durationMs":-10,"completedAt":9223372036854775807,"items":[{"type":"agentMessage","id":"b","text":"old"}]}
+        ]""").jsonArray
+        val timeline = CodexRpcClient.parseTurnsTimeline(turns, descending = false)
+        assertEquals(1234L, timeline[0].elapsedMs)
+        assertEquals(1700000000000L, timeline[0].completedAt)
+        assertNull(timeline[1].elapsedMs)
+        assertNull(timeline[1].completedAt)
     }
 
     @Test

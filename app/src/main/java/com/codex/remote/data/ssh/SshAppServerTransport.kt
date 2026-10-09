@@ -7,6 +7,7 @@ import com.codex.remote.domain.RemotePlatform
 import com.codex.remote.domain.SavedConnection
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.DefaultSecurityProviderConfig
 import net.schmizz.sshj.common.Buffer
@@ -45,6 +46,30 @@ class ActiveSshTransport internal constructor(
     val writer: BufferedWriter = BufferedWriter(OutputStreamWriter(command.outputStream, Charsets.UTF_8))
     val errorReader: BufferedReader = BufferedReader(InputStreamReader(command.errorStream, Charsets.UTF_8))
 
+    suspend fun readArtifact(path: String, root: String): ByteArray = withContext(Dispatchers.IO) {
+        require(root.isNotBlank() && path.isNotBlank() && '\u0000' !in path)
+        ssh.newSFTPClient().use { sftp ->
+            sftp.sftpEngine.timeoutMs = 20_000
+            val base = sftp.canonicalize(root).trimEnd('/')
+            val absolute = sftp.canonicalize(if (path.startsWith('/')) path else "$base/$path")
+            require(absolute.startsWith("$base/")) { "File must be inside the conversation workspace" }
+            // ponytail: previews are capped at 64 MB; larger videos need ranged SFTP streaming.
+            val size = sftp.stat(absolute).size
+            require(size in 1..64L * 1024 * 1024) { "Preview files must be at most 64 MB" }
+            sftp.open(absolute).use { file ->
+                val bytes = ByteArray(size.toInt())
+                var offset = 0
+                while (offset < bytes.size) {
+                    kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                    val count = file.read(offset.toLong(), bytes, offset, minOf(32768, bytes.size - offset))
+                    check(count > 0) { "File changed while loading; try again" }
+                    offset += count
+                }
+                bytes
+            }
+        }
+    }
+
     override fun close() {
         runCatching { writer.close() }
         runCatching { command.close() }
@@ -65,6 +90,7 @@ class SshAppServerTransportFactory(private val context: Context) {
             val remotePlatform = resolvePlatform(ssh, connection.platform)
             val codexVersion = readCodexVersion(ssh, remotePlatform)
             ssh.timeout = 0
+            ssh.connection.keepAlive.keepAliveInterval = 15
             val session = ssh.startSession()
             try {
                 val command = session.exec(appServerCommand(remotePlatform))

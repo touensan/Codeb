@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "revision": 2,
+  "fallback": {"efforts": ["low", "medium", "high"], "defaultEffort": "medium", "source": "Compatibility template; provider support must be verified"},
+  "rules": [
+    {"prefixes": ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-terra"], "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "defaultEffort": "medium", "source": "Codex-compatible gateway template; gateway acceptance of ultra must be verified"},
+    {"prefixes": ["gpt-6", "gpt-5.6"], "efforts": ["low", "medium", "high", "xhigh", "max"], "defaultEffort": "medium", "source": "https://developers.openai.com/api/docs/guides/reasoning"},
+    {"prefixes": ["gpt-5.5", "gpt-5.4", "gpt-5.3", "gpt-5.2"], "efforts": ["low", "medium", "high", "xhigh"], "defaultEffort": "medium", "source": "https://developers.openai.com/api/docs/guides/reasoning"},
+    {"prefixes": ["gpt-5.1"], "efforts": ["none", "low", "medium", "high"], "defaultEffort": "medium", "source": "https://developers.openai.com/api/docs/guides/reasoning"},
+    {"prefixes": ["gpt-5"], "efforts": ["minimal", "low", "medium", "high"], "defaultEffort": "medium", "source": "https://developers.openai.com/api/docs/guides/reasoning"},
+    {"prefixes": ["o1", "o3", "o4"], "efforts": ["low", "medium", "high"], "defaultEffort": "medium", "source": "https://developers.openai.com/api/docs/guides/reasoning"},
+    {"prefixes": ["gpt-4", "gpt-3.5", "gpt-image", "dall-e", "text-embedding"], "efforts": [], "defaultEffort": "", "source": "Non-reasoning or non-chat models"},
+    {"prefixes": ["deepseek-flash", "deepseek-v4"], "providerHost": "api.deepseek.com", "efforts": ["low", "high", "max"], "defaultEffort": "high", "source": "https://api-docs.deepseek.com/guides/thinking_mode/"}
+  ]
+}

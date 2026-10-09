@@ -5,6 +5,7 @@ import android.util.AtomicFile
 import com.codex.remote.R
 import com.codex.remote.ui.uiText
 import com.codex.remote.domain.AppUiState
+import com.codex.remote.domain.ComposerDefaults
 import com.codex.remote.domain.RemoteThread
 import com.codex.remote.domain.RemoteThreadSession
 import com.codex.remote.domain.mergeTimelineHistory
@@ -18,6 +19,7 @@ data class RemoteIndex(
     val threads: List<RemoteThread> = emptyList(),
     val selectedThreadId: String? = null,
     val selectedProjectPath: String? = null,
+    val projectPaths: List<String> = emptyList(),
 )
 
 class LocalStore(context: Context) {
@@ -31,18 +33,31 @@ class LocalStore(context: Context) {
     val cacheRoot = File(context.filesDir, "local-cache")
     val workspaceRoot = File(context.filesDir, "workspaces")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
+    private val composerPreferences = context.getSharedPreferences("composer-defaults", Context.MODE_PRIVATE)
     val cacheGeneration: Long get() = generation
     fun <T> locked(block: () -> T): T = synchronized(storageLock, block)
+
+    fun composerDefaults() = ComposerDefaults(
+        model = composerPreferences.getString("model", null),
+        reasoningEffort = composerPreferences.getString("reasoning", null),
+        serviceTier = composerPreferences.getString("tier", null),
+        isConfigured = composerPreferences.contains("model"),
+    )
+
+    fun saveComposerDefaults(defaults: ComposerDefaults) {
+        composerPreferences.edit().putString("model", defaults.model)
+            .putString("reasoning", defaults.reasoningEffort).putString("tier", defaults.serviceTier).apply()
+    }
 
     fun index(host: String): RemoteIndex? = read(file(host, "index"), RemoteIndex.serializer())
     fun session(host: String, thread: String): RemoteThreadSession? =
         read(file(host, thread), RemoteThreadSession.serializer())
 
-    fun saveRemote(state: AppUiState, expectedGeneration: Long = cacheGeneration) = synchronized(storageLock) {
+    fun saveRemote(state: AppUiState, expectedGeneration: Long = cacheGeneration, saveIndex: Boolean = true) = synchronized(storageLock) {
         if (expectedGeneration != generation) return@synchronized
         val host = state.activeConnection?.id ?: return@synchronized
-        write(file(host, "index"), RemoteIndex.serializer(), RemoteIndex(
-            state.threads, state.selectedThreadId, state.selectedProjectPath,
+        if (saveIndex) write(file(host, "index"), RemoteIndex.serializer(), RemoteIndex(
+            state.threads, state.selectedThreadId, state.selectedProjectPath, state.projects.map { it.path },
         ))
         val thread = state.selectedThreadId ?: return@synchronized
         if (state.timeline.isEmpty() && state.isBusy) return@synchronized
@@ -56,6 +71,7 @@ class LocalStore(context: Context) {
             serviceTier = state.selectedServiceTier,
             cwd = state.selectedProjectPath.orEmpty(),
             olderHistoryCursor = state.olderHistoryCursor,
+            activeTurnId = state.activeTurnId,
         ))
     }
 

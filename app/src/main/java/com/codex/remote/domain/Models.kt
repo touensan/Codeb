@@ -121,15 +121,16 @@ data class ComposerMention(
     val token: String,
 )
 
-internal fun groupThreadsByProject(threads: List<RemoteThread>): List<RemoteProject> = threads
-    .groupBy { remoteProjectIdentity(it.cwd) }
+internal fun groupThreadsByProject(threads: List<RemoteThread>, paths: List<String> = emptyList()): List<RemoteProject> {
+    val knownPaths = paths.filter(String::isNotBlank).associateBy(::remoteProjectIdentity)
+    return (knownPaths.mapValues { emptyList<RemoteThread>() } + threads.groupBy { remoteProjectIdentity(it.cwd) })
     .map { (identity, projectThreads) ->
         val sortedThreads = projectThreads.sortedWith(
             compareByDescending<RemoteThread> { it.isPinned }
                 .thenByDescending { it.updatedAt }
                 .thenBy { it.id },
         )
-        val path = normalizeRemoteProjectPath(sortedThreads.firstOrNull()?.cwd.orEmpty())
+        val path = normalizeRemoteProjectPath(sortedThreads.firstOrNull()?.cwd ?: knownPaths[identity].orEmpty())
         RemoteProject(
             id = identity,
             name = remoteProjectName(path),
@@ -139,6 +140,7 @@ internal fun groupThreadsByProject(threads: List<RemoteThread>): List<RemoteProj
         )
     }
     .sortedWith(compareByDescending<RemoteProject> { it.updatedAt }.thenBy { it.name.lowercase(Locale.ROOT) })
+}
 
 internal fun normalizeRemoteProjectPath(path: String): String {
     val trimmed = path.trim()
@@ -187,6 +189,30 @@ data class RemoteServiceTier(
     val name: String,
     val description: String = "",
 )
+
+data class ComposerDefaults(
+    val model: String? = null,
+    val reasoningEffort: String? = null,
+    val serviceTier: String? = null,
+    val isConfigured: Boolean = false,
+)
+
+internal fun ComposerDefaults.forModels(models: List<RemoteModel>): ComposerDefaults {
+    val selected = models.firstOrNull { it.id == model }
+        ?: models.firstOrNull { it.isDefault }
+        ?: models.firstOrNull()
+    return ComposerDefaults(
+        model = selected?.id,
+        reasoningEffort = reasoningEffort?.takeIf { effort -> selected?.supportedReasoningEfforts?.any { it.value == effort } == true }
+            ?: "medium".takeIf { effort -> selected?.supportedReasoningEfforts?.any { it.value == effort } == true }
+            ?: selected?.defaultReasoningEffort?.takeIf { effort -> selected.supportedReasoningEfforts.any { it.value == effort } }
+            ?: selected?.supportedReasoningEfforts?.firstOrNull()?.value,
+        serviceTier = if (isConfigured && serviceTier == null) null else (serviceTier
+            ?.takeIf { tier -> selected?.serviceTiers?.any { it.id == tier } == true }
+            ?: selected?.defaultServiceTier?.takeIf { tier -> selected.serviceTiers.any { it.id == tier } }),
+        isConfigured = isConfigured,
+    )
+}
 
 data class RemoteCollaborationMode(
     val name: String,
@@ -253,6 +279,8 @@ data class RemoteThreadSession(
     val approvalPolicy: String? = null,
     val approvalsReviewer: String? = null,
     val permissionProfile: String? = null,
+    val activeTurnId: String? = null,
+    val turnStartedAtEpochMs: Long? = null,
 )
 
 data class RemoteThreadHistoryPage(
@@ -352,6 +380,18 @@ data class TimelineItem(
     val expanded: Boolean = false,
     val fileChanges: List<FileChangeSummary> = emptyList(),
     val isGoal: Boolean = false,
+    val turnId: String? = null,
+    val elapsedMs: Long? = null,
+    // Epoch milliseconds; absent when neither the server nor this client observed completion.
+    val completedAt: Long? = null,
+    val media: List<String> = emptyList(),
+)
+
+internal fun TimelineItem.preservingTurnMetadata(previous: TimelineItem?): TimelineItem = copy(
+    body = if (kind == TimelineKind.REASONING && body.isBlank()) previous?.body.orEmpty() else body,
+    turnId = turnId ?: previous?.turnId,
+    elapsedMs = elapsedMs ?: previous?.elapsedMs,
+    completedAt = completedAt ?: previous?.completedAt,
 )
 
 @Serializable
@@ -369,7 +409,7 @@ internal fun AppUiState.withThreadIndex(index: List<RemoteThread>): AppUiState {
     // A paginated index is not a deletion signal; new threads can appear in it later.
     val opened = threads.firstOrNull { it.id == selectedThreadId }
     val refreshed = if (opened != null && index.none { it.id == opened.id }) index + opened else index
-    val projects = groupThreadsByProject(refreshed)
+    val projects = groupThreadsByProject(refreshed, projects.map { it.path })
     return copy(threads = refreshed, projects = projects,
         selectedProjectPath = selectedProjectPath ?: projects.firstOrNull()?.path)
 }
@@ -377,8 +417,45 @@ internal fun AppUiState.withThreadIndex(index: List<RemoteThread>): AppUiState {
 internal fun AppUiState.withStreamDelta(threadId: String?, id: String, delta: String, kind: TimelineKind): AppUiState {
     if (threadId == null || selectedThreadId != threadId || id.isBlank() || delta.isEmpty()) return this
     val existing = timeline.indexOfFirst { it.id == id }
-    return copy(timeline = if (existing < 0) timeline + TimelineItem(id, kind, body = delta, status = "inProgress")
+    return copy(timeline = if (existing < 0) timeline + TimelineItem(id, kind, body = delta, status = "inProgress", turnId = activeTurnId)
         else timeline.toMutableList().also { it[existing] = it[existing].copy(body = it[existing].body + delta) })
+}
+
+internal fun AppUiState.withTurnRunning(
+    threadId: String?,
+    turnId: String?,
+    running: Boolean,
+    monotonicNow: Long,
+    wallClockNow: Long,
+    reportedElapsedMs: Long? = null,
+    reportedCompletedAt: Long? = null,
+): AppUiState {
+    if (threadId == null) return this
+    val index = threads.map { if (it.id == threadId) it.copy(status = if (running) "active" else "idle") else it }
+    if (selectedThreadId != threadId) return copy(threads = index, projects = groupThreadsByProject(index, projects.map { it.path }))
+    if (!running && activeTurnId != null && turnId != null && turnId != activeTurnId) return this
+    if (!running && !isTurnRunning && activeTurnId == null && turnStartedAt == 0L && reportedElapsedMs == null && reportedCompletedAt == null) return this
+    val currentTurn = turnId ?: activeTurnId
+    val boundary = timeline.indexOfLast { it.kind == TimelineKind.USER }
+    val hasLiveBoundary = isTurnRunning || activeTurnId != null || turnStartedAt > 0
+    val startedAt = if (running && (turnStartedAt == 0L || !isTurnRunning || (activeTurnId != null && turnId != null && activeTurnId != turnId))) monotonicNow else turnStartedAt
+    val elapsed = startedAt.takeIf { it > 0 && monotonicNow >= it }?.let { monotonicNow - it }
+    return copy(
+        threads = index,
+        projects = groupThreadsByProject(index, projects.map { it.path }),
+        isTurnRunning = running,
+        turnStartedAt = if (running) startedAt else 0,
+        activeTurnId = currentTurn.takeIf { running },
+        timeline = timeline.mapIndexed { index, item ->
+            val belongs = if (item.turnId != null) item.turnId == currentTurn else hasLiveBoundary && boundary >= 0 && index >= boundary
+            if (!belongs) item else if (running) item.copy(turnId = currentTurn) else item.copy(
+                turnId = currentTurn,
+                status = if (listOf("inProgress", "in_progress", "running", "started").any { it.equals(item.status, ignoreCase = true) }) "completed" else item.status,
+                elapsedMs = reportedElapsedMs?.takeIf { it >= 0 } ?: item.elapsedMs ?: elapsed,
+                completedAt = reportedCompletedAt?.takeIf { it > 0 } ?: item.completedAt ?: wallClockNow,
+            )
+        },
+    )
 }
 
 data class ApprovalQuestion(
@@ -481,12 +558,12 @@ internal fun AppUiState.withThreadRenamed(threadId: String, name: String): AppUi
     val renamed = threads.map { thread ->
         if (thread.id == threadId) thread.copy(title = name) else thread
     }
-    return copy(threads = renamed, projects = groupThreadsByProject(renamed))
+    return copy(threads = renamed, projects = groupThreadsByProject(renamed, projects.map { it.path }))
 }
 
 internal fun AppUiState.withThreadArchived(threadId: String): AppUiState {
     val remaining = threads.filterNot { it.id == threadId }
-    val remainingProjects = groupThreadsByProject(remaining)
+    val remainingProjects = groupThreadsByProject(remaining, projects.map { it.path })
     val archivedSelectedThread = selectedThreadId == threadId
     val nextProjectPath = selectedProjectPath
         ?.takeIf { path -> remainingProjects.any { it.path == path } }
@@ -517,7 +594,7 @@ internal fun mergeTimelineHistory(
     val seen = mutableSetOf<String>()
     val merged = buildList(older.size + newer.size) {
         older.forEach { item ->
-            if (seen.add(item.id)) add(newerById[item.id] ?: item)
+            if (seen.add(item.id)) add(newerById[item.id]?.preservingTurnMetadata(item) ?: item)
         }
         newer.forEach { item ->
             if (seen.add(item.id)) add(item)
@@ -529,12 +606,23 @@ internal fun mergeTimelineHistory(
     for (index in merged.indices.reversed()) {
         val local = merged[index]
         if (!local.id.startsWith("local-") || local.kind != TimelineKind.USER || local.status == "sendFailed") continue
-        val acknowledged = (index + 1 until merged.size).firstOrNull { candidate ->
+        val acknowledged = merged.indices.firstOrNull { candidate ->
             val item = merged[candidate]
-            item.kind == TimelineKind.USER && !item.id.startsWith("local-") && item.id !in acknowledgedIds && item.body == local.body
+            item.kind == TimelineKind.USER && !item.id.startsWith("local-") && item.id !in acknowledgedIds && item.body == local.body &&
+                (local.turnId == null || item.turnId == local.turnId) && (candidate > index || local.turnId != null)
         } ?: continue
         acknowledgedIds += merged[acknowledged].id
-        merged[index] = merged.removeAt(acknowledged)
+        if (acknowledged > index) merged[index] = merged.removeAt(acknowledged) else merged.removeAt(index)
     }
-    return merged
+    // Live user IDs can differ from rollout IDs. Only reconcile the same confirmed turn;
+    // repeated prompts in different turns (and old history without turn IDs) remain intact.
+    val replacements = newer.filter { it.kind == TimelineKind.USER && it.turnId != null && !it.id.startsWith("local-") }
+        .groupBy { it.turnId to it.body }.mapValues { (_, items) -> ArrayDeque(items) }
+    val oldIds = older.mapTo(mutableSetOf()) { it.id }
+    val reconciled = merged.map { item ->
+        if (item.id in oldIds && item.kind == TimelineKind.USER && item.turnId != null && !item.id.startsWith("local-"))
+            replacements[item.turnId to item.body]?.removeFirstOrNull()?.preservingTurnMetadata(item) ?: item
+        else item
+    }
+    return reconciled.distinctBy { it.id }
 }

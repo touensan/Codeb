@@ -5,6 +5,7 @@
 /local.properties
 # Local conversation memory stays on this machine.
 /ai_codex.md
+/cloud/
 /*-qa.png
 **/build/
 **/__pycache__/
@@ -13,5 +14,12 @@
 *.iml
 *.jks
 *.keystore
+*.p12
+*.pfx
+.env
+.env.*
+/.secrets/
+/assets/branding/reference/
+/assets/branding/codeb-desktop-icon*
 *.log
 *.pyc

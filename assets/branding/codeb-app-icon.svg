@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" role="img" aria-labelledby="title desc" viewBox="-22.33333333333337 -26.83333333333337 1316.6666666666667 1316.6666666666667"><title xmlns="http://www.w3.org/2000/svg" id="title">白云Codeb 桌面图标 · 闪电版</title>
+<desc id="desc">复用白云 SI 原始太阳与云朵轮廓，蓝紫云朵带白色终端符号，下方为单个金色 Z 字闪电。</desc>
+<defs xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <path id="cloud" d="M 330,632 C 359,575 420,542 505,542 C 540,449 624,390 718,390 C 806,390 886,449 910,538 C 929,531 947,528 964,528 C 1025,528 1074,576 1074,636 C 1127,661 1166,701 1166,754 C 1166,818 1114,870 1050,870 H 310 C 247,870 197,819 197,756 C 197,699 252,646 330,632 Z" />
+  <path id="back" d="M 315,632 C 343,569 409,526 486,526 C 520,431 605,372 700,372 C 795,372 882,434 909,517 C 928,511 947,508 964,508 C 1027,508 1077,564 1077,636 C 1141,657 1189,700 1189,754 C 1189,826 1129,882 1052,882 H 310 C 242,882 189,827 189,756 C 189,697 242,643 315,632 Z" />
+  <mask id="sunCut" maskUnits="userSpaceOnUse" x="0" y="0" width="1254" height="1254"><path fill="white" d="M0 0H1254V1254H0Z" /><circle cx="452" cy="498" r="224" fill="none" stroke="black" stroke-width="13" /><use xlink:href="#back" fill="black" stroke="black" stroke-width="20" stroke-linejoin="round" /></mask>
+<mask id="haloCut" maskUnits="userSpaceOnUse" x="0" y="0" width="1254" height="1254"><path fill="white" d="M0 0H1254V1254H0Z" /><circle cx="452" cy="498" r="230.5" fill="black" /><use xlink:href="#back" fill="black" stroke="black" stroke-width="20" stroke-linejoin="round" /></mask>
+  <linearGradient id="codebCloud" x1="505" y1="402" x2="746" y2="872" gradientUnits="userSpaceOnUse"><stop stop-color="#C5C6FF"/><stop offset="0.37" stop-color="#9392FF"/><stop offset="0.72" stop-color="#665CF8"/><stop offset="1" stop-color="#4232E9"/></linearGradient>
+  <radialGradient id="codebShine" cx="0" cy="0" r="1" gradientTransform="translate(580 407) rotate(65) scale(400 530)" gradientUnits="userSpaceOnUse"><stop stop-color="#FFFFFF" stop-opacity="0.4"/><stop offset="0.68" stop-color="#FFFFFF" stop-opacity="0"/></radialGradient>
+</defs>
+
+
+<g xmlns="http://www.w3.org/2000/svg" mask="url(#haloCut)"><path d="M 328,172 C 331,153 345,149 357,162 C 393,200 420,233 455,233 C 497,233 530,191 569,159 C 581,149 593,155 594,170 C 596,217 598,265 626,287 C 651,309 702,299 744,285 C 762,278 774,294 760,311 L 704,388 L 629,529 L 470,666 L 312,656 C 258,649 211,648 155,669 C 138,675 128,662 139,648 L 175,601 C 200,566 187,538 154,519 L 96,493 C 80,486 80,474 95,466 L 159,430 C 196,409 207,380 187,346 L 147,306 C 135,291 145,277 160,281 C 206,294 256,310 290,280 C 319,255 322,211 328,172 Z" transform="translate(7 7)" fill="#D9B63F" /><path d="M 328,172 C 331,153 345,149 357,162 C 393,200 420,233 455,233 C 497,233 530,191 569,159 C 581,149 593,155 594,170 C 596,217 598,265 626,287 C 651,309 702,299 744,285 C 762,278 774,294 760,311 L 704,388 L 629,529 L 470,666 L 312,656 C 258,649 211,648 155,669 C 138,675 128,662 139,648 L 175,601 C 200,566 187,538 154,519 L 96,493 C 80,486 80,474 95,466 L 159,430 C 196,409 207,380 187,346 L 147,306 C 135,291 145,277 160,281 C 206,294 256,310 290,280 C 319,255 322,211 328,172 Z" fill="#FFDC52" /></g>
+<circle xmlns="http://www.w3.org/2000/svg" cx="452" cy="498" r="217.5" fill="#E45A52" mask="url(#sunCut)" />
+
+<g transform="translate(0 16) rotate(5 650 1034)">
+  <path d="M926 880L277 1008L570 1026L329 1181L1024 967L739 976Z" transform="translate(7 7)" fill="#D9B63F"/>
+  <path d="M926 880L277 1008L570 1026L329 1181L1024 967L739 976Z" fill="#FFDC52"/>
+</g>
+<g>
+
+  <g>
+  <use xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#cloud" transform="translate(7 7)" fill="#3528BA"/>
+  <use xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#cloud" fill="url(#codebCloud)"/>
+  <use xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#cloud" fill="url(#codebShine)"/>
+  </g>
+</g>
+<path d="M548 612L590 678L548 744M683 744H797" fill="none" stroke="#3425C0" stroke-opacity="0.18" stroke-width="42" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 6)"/>
+<path d="M548 612L590 678L548 744M683 744H797" fill="none" stroke="#FFFFFF" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

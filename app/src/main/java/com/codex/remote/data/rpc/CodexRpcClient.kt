@@ -77,6 +77,8 @@ sealed interface AppServerEvent {
         val threadId: String?,
         val running: Boolean,
         val turnId: String? = null,
+        val elapsedMs: Long? = null,
+        val completedAt: Long? = null,
     ) : AppServerEvent
     data class Approval(val threadId: String?, val request: ApprovalRequest) : AppServerEvent
     data object AccountChanged : AppServerEvent
@@ -95,10 +97,22 @@ sealed interface AppServerEvent {
     data class LoginCompleted(val success: Boolean, val error: String?) : AppServerEvent
     data class Failure(val message: String, val threadId: String? = null) : AppServerEvent
     data class Warning(val message: String) : AppServerEvent
+    data object ConnectionLost : AppServerEvent
     data class Diagnostic(val message: String) : AppServerEvent
 }
 
 class RpcException(message: String, val code: Int? = null) : Exception(message)
+
+internal fun remoteDirectoryChildPath(parent: String, name: String): String {
+    val windows = parent.getOrNull(1) == ':' || parent.startsWith("\\\\")
+    require(parent.startsWith('/') || parent.startsWith("\\\\") || Regex("^[A-Za-z]:[/\\\\]").containsMatchIn(parent)) { "Folder path must be absolute" }
+    require(parent.none { it.isISOControl() }) { "Invalid folder path" }
+    require(name.isNotBlank() && name != "." && name != ".." && name.toByteArray(Charsets.UTF_8).size <= 255 && name.none { it == '/' || it == '\\' || it.isISOControl() }) { "Invalid folder name" }
+    if (windows) require(name.none { it in ":*?\"<>|" } && !name.endsWith('.') && !name.endsWith(' ') &&
+        !Regex("(?i)^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\\..*)?$").matches(name)) { "Invalid Windows folder name" }
+    val separator = if ('\\' in parent && '/' !in parent) '\\' else '/'
+    return parent.trimEnd('/', '\\') + separator + name
+}
 
 class CodexRpcClient(
     private val transport: ActiveSshTransport,
@@ -111,6 +125,8 @@ class CodexRpcClient(
     private val _events = MutableSharedFlow<AppServerEvent>(extraBufferCapacity = 128)
     val events: SharedFlow<AppServerEvent> = _events
     private var readerJob: Job? = null
+
+    suspend fun readArtifact(path: String, root: String): ByteArray = transport.readArtifact(path, root)
 
     suspend fun initialize(): RemoteServerInfo {
         readerJob = scope.launch { readLoop() }
@@ -163,6 +179,12 @@ class CodexRpcClient(
                 isFile = entry.boolean("isFile"),
             )
         }
+    }
+
+    suspend fun createRemoteDirectory(parent: String, name: String): String {
+        val path = remoteDirectoryChildPath(parent, name)
+        request("fs/createDirectory", buildJsonObject { put("path", path); put("recursive", false) })
+        return path
     }
 
     suspend fun listCollaborationModes(): List<RemoteCollaborationMode> {
@@ -317,9 +339,7 @@ class CodexRpcClient(
         return ForkedRemoteThread(
             thread = thread,
             session = RemoteThreadSession(
-                timeline = threadObject?.array("turns").orEmpty()
-                    .flatMap { it.asObject()?.array("items").orEmpty() }
-                    .mapNotNull(::parseTimelineItem),
+                timeline = parseTurnsTimeline(threadObject?.array("turns").orEmpty(), descending = false),
                 model = result.string("model") ?: model,
                 reasoningEffort = result.string("reasoningEffort"),
                 serviceTier = result.string("serviceTier") ?: serviceTier,
@@ -437,7 +457,7 @@ class CodexRpcClient(
         })
         return try {
             val page = request("thread/turns/list", threadTurnsListParams(threadId, null))
-            sessionFromResume(result, result.obj("thread"), cwd,
+            sessionFromResume(JsonObject(result + ("initialTurnsPage" to page)), result.obj("thread"), cwd,
                 parseTurnsTimeline(page.array("data")), page.string("nextCursor"))
         } catch (error: RpcException) {
             if (!error.isHistoryPaginationUnavailable()) throw error
@@ -460,10 +480,7 @@ class CodexRpcClient(
                 thread = thread,
                 fallbackCwd = cwd,
                 timeline = parseTurnsTimeline(initialPage.array("data")),
-                olderHistoryCursor = selectOlderHistoryCursor(
-                    initialPageCursor = initialPage.string("nextCursor"),
-                    turnsBackwardsCursor = result.string("turnsBackwardsCursor"),
-                ),
+                olderHistoryCursor = initialPage.string("nextCursor")?.takeIf(String::isNotBlank),
             )
         }
 
@@ -514,6 +531,10 @@ class CodexRpcClient(
         approvalPolicy = result.string("approvalPolicy"),
         approvalsReviewer = result.string("approvalsReviewer"),
         permissionProfile = result.obj("activePermissionProfile")?.string("id"),
+        activeTurnId = timeline.lastOrNull { it.status == "inProgress" }?.turnId,
+        turnStartedAtEpochMs = (result.obj("initialTurnsPage")?.array("data") ?: thread?.array("turns")).orEmpty()
+            .mapNotNull { it.asObject() }.lastOrNull { it.string("status") == "inProgress" }
+            ?.get("startedAt")?.let { (it as? JsonPrimitive)?.longOrNull }?.takeIf { it > 0 && it <= Long.MAX_VALUE / 1000 }?.times(1000),
     )
 
     suspend fun loadOlderThreadHistory(threadId: String, cursor: String): RemoteThreadHistoryPage {
@@ -675,11 +696,11 @@ class CodexRpcClient(
                 val params = message.obj("params") ?: buildJsonObject {}
                 if (id != null) handleServerRequest(id, method, params) else handleNotification(method, params)
             }
-            _events.emit(AppServerEvent.Failure("远端 app-server 已断开"))
+            _events.emit(AppServerEvent.ConnectionLost)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
-            _events.emit(AppServerEvent.Failure(error.message ?: "SSH 数据流已中断"))
+            _events.emit(AppServerEvent.ConnectionLost)
         } finally {
             val error = RpcException("远端连接已关闭")
             pending.values.forEach { it.completeExceptionally(error) }
@@ -702,7 +723,7 @@ class CodexRpcClient(
                 val status = item.status.ifBlank {
                     if (method == "item/started") "inProgress" else "completed"
                 }
-                _events.emit(AppServerEvent.ItemUpsert(params.string("threadId"), item.copy(status = status)))
+                _events.emit(AppServerEvent.ItemUpsert(params.string("threadId"), item.copy(status = status, turnId = params.string("turnId"))))
             }
             "item/agentMessage/delta" -> _events.emit(
                 AppServerEvent.AgentDelta(
@@ -745,7 +766,8 @@ class CodexRpcClient(
                 val turnError = turn?.obj("error")?.string("message")
                 val threadId = params.string("threadId")
                 if (!turnError.isNullOrBlank()) _events.emit(AppServerEvent.Failure(turnError, threadId))
-                _events.emit(AppServerEvent.TurnRunning(threadId, false, turn?.string("id")))
+                _events.emit(AppServerEvent.TurnRunning(threadId, false, turn?.string("id"),
+                    (turn?.get("durationMs") as? JsonPrimitive)?.longOrNull?.takeIf { it >= 0 }, completedAtMillis(turn)))
             }
             "account/updated" -> _events.emit(AppServerEvent.AccountChanged)
             "thread/started", "thread/status/changed", "thread/archived", "thread/deleted", "thread/closed",
@@ -914,9 +936,18 @@ class CodexRpcClient(
         internal fun parseTurnsTimeline(
             turns: List<JsonElement>,
             descending: Boolean = true,
-        ): List<TimelineItem> = (if (descending) turns.asReversed() else turns)
-            .flatMap { it.asObject()?.array("items").orEmpty() }
-            .mapNotNull(::parseTimelineItem)
+        ): List<TimelineItem> = (if (descending) turns.asReversed() else turns).flatMap { element ->
+            val turn = element.asObject()
+            turn?.array("items").orEmpty().mapNotNull(::parseTimelineItem).map { it.copy(
+                turnId = turn?.string("id"),
+                elapsedMs = (turn?.get("durationMs") as? JsonPrimitive)?.longOrNull?.takeIf { it >= 0 },
+                completedAt = completedAtMillis(turn),
+                status = it.status.ifBlank { turn?.string("status").orEmpty() },
+            ) }
+        }
+
+        private fun completedAtMillis(turn: JsonObject?): Long? = (turn?.get("completedAt") as? JsonPrimitive)
+            ?.longOrNull?.takeIf { it > 0 && it <= Long.MAX_VALUE / 1000 }?.times(1000)
 
         internal fun checkedNextHistoryCursor(
             returnedCursor: String?,
@@ -1085,7 +1116,7 @@ class CodexRpcClient(
             }
             if (!model.isNullOrBlank()) put("model", model)
             if (!reasoningEffort.isNullOrBlank()) put("effort", reasoningEffort)
-            if (!serviceTier.isNullOrBlank()) put("serviceTier", serviceTier)
+            put("serviceTier", serviceTier?.takeIf(String::isNotBlank)?.let(::JsonPrimitive) ?: JsonNull)
             if (collaborationMode != null && !model.isNullOrBlank()) {
                 put("collaborationMode", collaborationModeParam(collaborationMode, model, reasoningEffort))
             }
@@ -1374,6 +1405,13 @@ class CodexRpcClient(
                         ?: item.string("prompt")
                         ?: item["result"]?.toString().orEmpty(),
                     status = item.string("status").orEmpty(),
+                    media = item.array("contentItems").mapNotNull { content -> content.asObject()?.let { output ->
+                        when (output.string("type")) {
+                            "inputImage", "image" -> output.string("imageUrl")
+                            "inputAudio", "audio" -> output.string("audioUrl")
+                            else -> null
+                        }
+                    } },
                 )
                 "subAgentActivity" -> TimelineItem(
                     id,
@@ -1392,6 +1430,7 @@ class CodexRpcClient(
                     TimelineKind.TOOL,
                     title = "Viewed image",
                     body = item.string("path").orEmpty(),
+                    media = listOfNotNull(item.string("path")),
                 )
                 "imageGeneration" -> TimelineItem(
                     id,
@@ -1399,6 +1438,7 @@ class CodexRpcClient(
                     title = "Image generation",
                     body = item.string("savedPath") ?: item.string("revisedPrompt").orEmpty(),
                     status = item.string("status").orEmpty(),
+                    media = listOfNotNull(item.string("savedPath") ?: item.string("result")?.takeIf(String::isNotBlank)?.let { "data:image/png;base64,$it" }),
                 )
                 "enteredReviewMode", "exitedReviewMode" -> TimelineItem(
                     id,

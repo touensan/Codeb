@@ -1,73 +1,66 @@
-# Codex Remote for Android
+# 白云Codeb · Codeb for Android
 
-本 fork 新增中文/英语/日语、手机本地聊天与工作空间、OpenAI 兼容 API、
-远程历史缓存、活动视图及开发者诊断接口。功能、存储规则及实际限制见
-[`docs/LOCAL_CLIENT.md`](docs/LOCAL_CLIENT.md)。服务器仍只需 SSH 和官方 Codex。
-开发版与原 App 并存；此分支改造版请自行构建，下面上游 Release 不是本分支的新 APK。
+<img src="assets/branding/codeb-app-icon.png" alt="白云Codeb" width="128" />
 
-[![Android CI](https://github.com/liuaho6-commits/codex-remote-android/actions/workflows/android.yml/badge.svg)](https://github.com/liuaho6-commits/codex-remote-android/actions/workflows/android.yml)
+通过 SSH 使用服务器上的官方 Codex，也可以在手机上直接使用兼容 OpenAI 的 API。
+原生 Android / Kotlin / Jetpack Compose，支持中文、English、日本語。
+
+[下载正式版](https://github.com/touensan/Codeb/releases/latest) · [官网](https://codeb.baiyun.si/) · [配置教程](https://api.baiyun.si/docs/codeb/) · [功能与限制](docs/LOCAL_CLIENT.md)
+
+[![Android CI](https://github.com/touensan/Codeb/actions/workflows/android.yml/badge.svg)](https://github.com/touensan/Codeb/actions/workflows/android.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-An Android client for Codex hosts reached over SSH. A saved connection represents
-one host; after connecting, the app imports every resumable remote Codex
-conversation and groups projects from each thread's working directory. The app
-does not run a local agent: it starts `codex app-server` remotely and speaks its
-JSONL protocol over SSH.
+## 可以做什么
 
-Implementation notes and the audited Codex source boundary are documented in
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
-The current Desktop parity matrix and known gaps are tracked in
-[`docs/FEATURE_PARITY.md`](docs/FEATURE_PARITY.md).
+- **远程 Codex**：保存多个 SSH 连接，切换已有项目，继续服务器会话，查看历史、活动、命令与文件变更；模型、推理强度及速度选项跟随服务器实际能力。
+- **手机直连 API**：Chat Completions / Responses 流式对话；管理多个供应商，拉取、搜索和分页查看模型，逐个测试模型，自动匹配推理档位，也能填写供应商自定义的原始 ID。
+- **阅读与文件**：Markdown 排版、源码/预览切换、代码复制、文件导入导出，以及受支持的图片、音视频和 PDF 预览。
+- **本地保存**：聊天、草稿和已读取的远程历史保存在手机；手动清理缓存保留工作空间、主机和 API 配置。
+- **语言切换**：打开侧栏 → 设置 → 显示语言，可选择跟随系统、中文、English、日本語，立即生效并保存选择。
+- **关于与更新**：显示实际安装版本、检查更新、打开配置教程；客户端读取推荐开关和推理模板，离线保留有效缓存。
 
-## Remote host requirements
+只需 SSH 和服务器上原装的官方 Codex，不要求安装第三方桥接、Hub、包装器或额外常驻服务。
+手机直连 API 时无需服务器，聊天内容直接发送到用户配置的供应商。
 
-- OpenSSH access with a password or PEM/OpenSSH private key.
-- `codex` installed and available from the remote login shell (`codex --version`).
-- A Codex account on the remote host. Existing API-key/ChatGPT auth is reused;
-  when required, the app can start Codex's remote ChatGPT device-code login.
-- A trusted, least-privilege remote user.
+## 安装与升级
 
-No project path is configured on Android. Existing projects and conversations
-come from the remote Codex history returned by `thread/list`.
-Opening a conversation resumes its live app-server subscription while loading
-only the latest five full turns; older turns are fetched as the chat is scrolled
-to the top, with a legacy full-history fallback for older Codex hosts.
+当前正式版：**0.2.4**，Android 8.0 及以上。下载 Release 中的 `Codeb-0.2.4.apk` 后安装。
+正式包关闭调试模式和调试 API，不带 `dev` 版本后缀。
 
-The model and reasoning pickers are also remote data. They are loaded from
-`model/list`, so the choices follow the Codex version and account configured on
-that SSH host rather than a hard-coded Android catalog.
+为让已有白云Codeb 用户覆盖升级并保留聊天、SSH 和 API 配置，正式版沿用原安装包名
+`com.codex.remote.dev` 及同一签名身份；包名中的历史后缀不代表构建仍是开发版。
+请直接覆盖安装，不要先卸载。原上游 `com.codex.remote` 应用保持独立。
 
-The composer uses the same remote app-server surfaces for Plan mode, service
-tiers, permission profiles, image input, running-turn steering, Goals, context
-compaction, forks, code review, MCP status, remote skills and installed plugins.
-Task pins are stored on the remote Codex thread rather than only on Android.
+桌面图标使用原生自适应图标：透明的太阳/紫云/闪电前景，白色底板由系统裁为圆形或圆角方形。
+主体占比约八成，避免普通透明图标被厂商桌面再缩小一层。
 
-## Install
+## 连接服务器
 
-Download the signed APK from the latest
-[GitHub release](https://github.com/liuaho6-commits/codex-remote-android/releases/latest).
-Android may ask you to allow installation from your browser or file manager.
+服务器需要 OpenSSH、可用的官方 `codex` 命令和已完成的 Codex 认证。
+支持密码或 PEM/OpenSSH 私钥。首次连接必须核对 SSH 主机指纹，指纹变化时阻止自动连接。
+官方账号授权、API 中转配置与 Linux 安装步骤见[配置教程](https://api.baiyun.si/docs/codeb/)。
 
-The project is an unofficial community client. It is not affiliated with or
-endorsed by OpenAI. Codex and OpenAI are trademarks of their respective owner.
+远程功能受服务器 Codex 版本、认证与协议能力影响。其他 CLI 正在独占写入的会话只能安全同步历史，
+不能保证接管其执行。模型出现在目录中不代表所有接口或推理档位都可用，建议逐项测试。
+Responses 压缩需要上游支持相应端点；Chat Completions 没有通用原生压缩。
 
-## Build
+## 开源范围
 
-Open this directory in Android Studio, or run `./gradlew assembleDebug` with
-JDK 17 and Android SDK 35 installed.
+**本仓库只开源 Android APP**：客户端源码、图标、测试及使用文档。
+APP 读取云端公开配置所需的客户端代码属于本仓库；云控后台、管理界面、数据库、部署配置、
+服务器工具箱实现及签名材料不在本仓库中。云端服务不随 APP 一同开源。
 
-Run the device-side regression suite on a connected emulator or Android device:
+## 本地构建
 
-```text
-./gradlew connectedDebugAndroidTest
+需要 JDK 17、Android SDK 35：
+
+```sh
+./gradlew :app:testDebugUnitTest :app:lintDebug :app:assembleDebug
+./gradlew :app:connectedDebugAndroidTest
 ```
 
-The first SSH handshake asks you to verify its SHA-256 host-key fingerprint
-before any password or private key is sent. Subsequent key changes are blocked
-until the saved fingerprint is explicitly cleared by editing the connection.
-
-To produce a signed release build, provide these environment variables before
-running `./gradlew assembleRelease`:
+本地调试包使用 `com.codex.remote.dev.debug`，与正式版分开。真实 SSH/收费 API 检查默认不运行。
+签署正式包时，在仓库外管理私有 keystore，设置以下环境变量后运行 `./gradlew :app:assembleRelease`：
 
 ```text
 CODEX_REMOTE_KEYSTORE_PATH
@@ -76,9 +69,13 @@ CODEX_REMOTE_KEY_ALIAS
 CODEX_REMOTE_KEY_PASSWORD
 ```
 
-Signing material must remain outside the repository. APKs, keystores, local SDK
-configuration, build caches, and QA captures are excluded by `.gitignore`.
+自己构建的签名与官方不同，不能覆盖官方安装；不要通过卸载来规避签名错误而丢失数据。
 
-## License
+## 来源与许可证
 
-Licensed under the [Apache License 2.0](LICENSE).
+本项目基于 [Codex Remote for Android](https://github.com/liuhao-labs/codex-remote-android)，
+保留上游 Git 历史及 [Apache-2.0 许可证](LICENSE)。历史上游标签不代表白云Codeb 的当前功能。
+这是社区客户端，与 OpenAI 无隶属或官方背书关系；Codex 和 OpenAI 商标归其各自权利人所有。
+
+Codeb is a native Android client for official Codex over SSH and OpenAI-compatible APIs.
+Only the Android application is open source; the cloud administration service is not included.

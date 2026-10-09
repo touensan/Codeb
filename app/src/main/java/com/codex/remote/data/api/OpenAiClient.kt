@@ -4,6 +4,7 @@ import com.codex.remote.R
 import com.codex.remote.ui.uiText
 
 import com.codex.remote.data.store.ApiModel
+import com.codex.remote.data.store.ApiModelTest
 import com.codex.remote.data.store.ApiProtocol
 import com.codex.remote.data.store.ApiProvider
 import com.codex.remote.data.store.LocalMessage
@@ -19,15 +20,26 @@ import java.net.URL
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-class OpenAiClient {
+open class OpenAiClient {
     private val json = Json { ignoreUnknownKeys = true }
 
-    suspend fun models(provider: ApiProvider, key: String): List<ApiModel> = withContext(Dispatchers.IO) {
+    open suspend fun models(provider: ApiProvider, key: String): List<ApiModel> = withContext(Dispatchers.IO) {
         val connection = open(provider, key, "models")
         try {
             checkResponse(connection)
             parseModels(json.parseToJsonElement(connection.inputStream.bufferedReader().use { it.readText() }).jsonObject)
         } finally { connection.disconnect() }
+    }
+
+    open suspend fun testModel(provider: ApiProvider, key: String): ApiModelTest {
+        val body = probeBody(provider)
+        val path = if (provider.protocol == ApiProtocol.RESPONSES) "responses" else "chat/completions"
+        val response = try { requestJson(provider, key, path, body) }
+        catch (error: ApiHttpException) {
+            if (provider.protocol != ApiProtocol.CHAT_COMPLETIONS || !error.legacyLimit) throw error
+            requestJson(provider, key, path, JsonObject(body.filterKeys { it != "max_completion_tokens" } + ("max_tokens" to JsonPrimitive(64))))
+        }
+        return probeResult(response)
     }
 
     suspend fun compact(provider: ApiProvider, key: String, messages: List<LocalMessage>, prefix: JsonArray?): JsonArray {
@@ -76,7 +88,7 @@ class OpenAiClient {
         }
     }
 
-    suspend fun stream(provider: ApiProvider, key: String, messages: List<LocalMessage>, prefix: JsonArray? = null, onDelta: (String) -> Unit) = withContext(Dispatchers.IO) {
+    open suspend fun stream(provider: ApiProvider, key: String, messages: List<LocalMessage>, prefix: JsonArray? = null, onDelta: (String) -> Unit) = withContext(Dispatchers.IO) {
         val coroutineContext = currentCoroutineContext()
         suspendCancellableCoroutine<Unit> { continuation ->
         val connection = open(provider, key, if (provider.protocol == ApiProtocol.RESPONSES) "responses" else "chat/completions")
@@ -144,17 +156,38 @@ class OpenAiClient {
         }
 
     private fun checkResponse(connection: HttpURLConnection) {
-        require(connection.responseCode in 200..299) { uiText(R.string.api_http_error, "API HTTP %1\$d; check endpoint, model and credentials", connection.responseCode) }
+        val status = connection.responseCode
+        if (status in 200..299) return
+        val error = runCatching { json.parseToJsonElement(connection.errorStream?.bufferedReader()?.use { reader ->
+            val buffer = CharArray(4096)
+            val count = reader.read(buffer)
+            if (count > 0) String(buffer, 0, count) else ""
+        }.orEmpty()).jsonObject["error"]?.jsonObject }.getOrNull()
+        val message = error?.get("message")?.jsonPrimitive?.contentOrNull.orEmpty()
+        // Only use upstream text to detect this parameter; never display credentials echoed by a relay.
+        throw ApiHttpException(status, status == 400 && message.contains("max_completion_tokens") &&
+            (message.contains("unsupported", true) || message.contains("not supported", true) || message.contains("unknown", true)))
     }
 
+    private class ApiHttpException(status: Int, val legacyLimit: Boolean) : IllegalArgumentException(
+        uiText(R.string.api_http_error, "API HTTP %1\$d; check endpoint, model and credentials", status))
+
     companion object {
+        internal fun probeResult(response: JsonObject): ApiModelTest {
+            check((response["error"] == null || response["error"] == JsonNull) && response["status"]?.jsonPrimitive?.contentOrNull != "failed") { uiText(R.string.model_probe_failed, "Upstream failed; check the model and API type") }
+            return if (responseText(response).isNotBlank()) ApiModelTest("passed", uiText(R.string.model_probe_success, "Request succeeded with a text reply"))
+            else ApiModelTest("inconclusive", uiText(R.string.model_probe_empty, "Request accepted without text; retry or check the model type"))
+        }
+        internal fun probeBody(provider: ApiProvider): JsonObject = JsonObject(
+            requestBody(provider.copy(effort = ""), listOf(LocalMessage(role = "user", text = "Reply only OK."))) +
+                mapOf("stream" to JsonPrimitive(false), (if (provider.protocol == ApiProtocol.RESPONSES) "max_output_tokens" else "max_completion_tokens") to JsonPrimitive(64)))
         internal fun parseModels(response: JsonObject): List<ApiModel> = response["data"]?.jsonArray.orEmpty().mapNotNull { element ->
             val model = element as? JsonObject ?: return@mapNotNull null
             val id = model["id"]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
             val efforts = (model["supported_reasoning_efforts"] ?: model["reasoning_efforts"]) as? JsonArray
             ApiModel(id, efforts.orEmpty().mapNotNull { effort ->
                 (effort as? JsonPrimitive)?.contentOrNull ?: (effort as? JsonObject)?.get("value")?.jsonPrimitive?.contentOrNull
-            }.distinct())
+            }.distinct(), effortsReported = efforts != null)
         }.distinctBy { it.id }.sortedBy { it.id }
 
         internal fun requestBody(provider: ApiProvider, messages: List<LocalMessage>, prefix: JsonArray? = null): JsonObject = buildJsonObject {
@@ -167,9 +200,28 @@ class OpenAiClient {
             }
             put(if (provider.protocol == ApiProtocol.RESPONSES) "input" else "messages", buildJsonArray {
                 if (provider.protocol == ApiProtocol.RESPONSES) prefix?.forEach { add(it) }
-                messages.filter { it.text.isNotBlank() }.forEach { message -> add(buildJsonObject {
+                messages.filter { it.text.isNotBlank() || it.attachments.isNotEmpty() }.forEach { message -> add(buildJsonObject {
                     put("role", message.role)
-                    put("content", message.text)
+                    if (message.attachments.isEmpty()) put("content", message.text) else put("content", buildJsonArray {
+                        val responses = provider.protocol == ApiProtocol.RESPONSES
+                        val textType = if (responses) "input_text" else "text"
+                        if (message.text.isNotBlank()) add(buildJsonObject { put("type", textType); put("text", message.text) })
+                        message.attachments.forEach { attachment -> add(buildJsonObject {
+                            when (attachment.kind) {
+                                "text" -> { put("type", textType); put("text", "${attachment.name}\n${attachment.data}") }
+                                "image" -> {
+                                    require(attachment.data.startsWith("data:image/"))
+                                    put("type", if (responses) "input_image" else "image_url")
+                                    if (responses) put("image_url", attachment.data) else put("image_url", buildJsonObject { put("url", attachment.data) })
+                                }
+                                "file" -> {
+                                    require(responses && attachment.data.startsWith("data:application/pdf;base64,")) { uiText(R.string.unsupported_attachment, "Choose an image, UTF-8 text file, or a PDF with Responses API") }
+                                    put("type", "input_file"); put("filename", attachment.name); put("file_data", attachment.data)
+                                }
+                                else -> error("Unsupported attachment")
+                            }
+                        }) }
+                    })
                 }) }
             })
             if (provider.protocol == ApiProtocol.RESPONSES) put("store", false)

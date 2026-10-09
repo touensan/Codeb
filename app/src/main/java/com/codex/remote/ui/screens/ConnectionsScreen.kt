@@ -1,5 +1,7 @@
 package com.codex.remote.ui.screens
 
+import androidx.compose.ui.platform.testTag
+
 import com.codex.remote.R
 import com.codex.remote.ui.uiText
 
@@ -91,6 +93,7 @@ fun ConnectionsScreen(
     onSave: (ConnectionDraft, Boolean) -> Unit,
     onCloseEditor: () -> Unit,
     onDismissNotice: () -> Unit,
+    hostStatuses: Map<String, ConnectionStatus> = emptyMap(),
 ) {
     val snackbarHostState = remember { SnackbarHostState() }
     var pendingDelete by remember { mutableStateOf<SavedConnection?>(null) }
@@ -143,7 +146,7 @@ fun ConnectionsScreen(
                         ConnectionRow(
                             connection = connection,
                             isActive = state.activeConnection?.id == connection.id,
-                            isConnecting = state.activeConnection?.id == connection.id && state.connectionStatus == ConnectionStatus.CONNECTING,
+                            status = hostStatuses[connection.id] ?: if (state.activeConnection?.id == connection.id) state.connectionStatus else ConnectionStatus.DISCONNECTED,
                             onConnect = { onConnect(connection) },
                             onEdit = { onEdit(connection) },
                             onDelete = { pendingDelete = connection },
@@ -222,7 +225,7 @@ private fun EmptyConnections(onAdd: () -> Unit) {
 private fun ConnectionRow(
     connection: SavedConnection,
     isActive: Boolean,
-    isConnecting: Boolean,
+    status: ConnectionStatus,
     onConnect: () -> Unit,
     onEdit: () -> Unit,
     onDelete: () -> Unit,
@@ -249,13 +252,15 @@ private fun ConnectionRow(
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(connection.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    Spacer(Modifier.width(8.dp))
+                    HostConnectionDot(status)
                     if (isActive) {
                         Spacer(Modifier.width(8.dp))
                         Icon(
                             Icons.Outlined.CheckCircle,
                             contentDescription = uiText(R.string.ui_012, "当前主机"),
                             modifier = Modifier.size(15.dp),
-                            tint = MaterialTheme.colorScheme.secondary,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 }
@@ -273,10 +278,10 @@ private fun ConnectionRow(
                     maxLines = 1,
                 )
             }
-            if (isConnecting) {
-                CircularProgressIndicator(Modifier.size(22.dp), strokeWidth = 2.dp)
+            if (status == ConnectionStatus.CONNECTING) {
+                CircularProgressIndicator(Modifier.size(22.dp).testTag("host-connecting-${connection.id}"), strokeWidth = 2.dp)
             } else {
-                TextButton(onClick = onConnect) { Text(if (isActive) uiText(R.string.ui_014, "Reconnect") else uiText(R.string.ui_015, "Connect")) }
+                TextButton(onClick = onConnect, modifier = Modifier.testTag("host-connect-${connection.id}")) { Text(if (status == ConnectionStatus.CONNECTED) uiText(R.string.ui_014, "Reconnect") else uiText(R.string.ui_015, "Connect")) }
             }
             IconButton(onClick = onEdit) { Icon(Icons.Outlined.Edit, contentDescription = uiText(R.string.ui_016, "编辑")) }
             IconButton(onClick = onDelete) { Icon(Icons.Outlined.DeleteOutline, contentDescription = uiText(R.string.ui_007, "删除")) }

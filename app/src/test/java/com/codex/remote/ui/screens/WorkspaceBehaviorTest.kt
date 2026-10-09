@@ -3,6 +3,7 @@ package com.codex.remote.ui.screens
 import com.codex.remote.domain.PermissionMode
 import com.codex.remote.domain.TimelineItem
 import com.codex.remote.domain.TimelineKind
+import com.codex.remote.domain.FileChangeSummary
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -10,6 +11,40 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WorkspaceBehaviorTest {
+    @Test
+    fun replyFooterKeepsFilesWithinTheirTurnAndSupportsLegacyHistory() {
+        val firstFile = FileChangeSummary("src/First.kt", "update", "+first")
+        val secondFile = FileChangeSummary("src/Second.kt", "update", "+second")
+        val rows = conversationPresentation(listOf(
+            TimelineItem("user-1", TimelineKind.USER, body = "one", turnId = "t1"),
+            TimelineItem("file-1", TimelineKind.FILE_CHANGE, status = "completed", fileChanges = listOf(firstFile), turnId = "t1"),
+            TimelineItem("file-1b", TimelineKind.FILE_CHANGE, status = "completed", fileChanges = listOf(firstFile.copy(diff = "+next")), turnId = "t1"),
+            TimelineItem("comment", TimelineKind.AGENT, body = "working", turnId = "t1"),
+            TimelineItem("steer", TimelineKind.USER, body = "also this", turnId = "t1"),
+            TimelineItem("answer-1", TimelineKind.AGENT, body = "done", turnId = "t1", elapsedMs = 20000, completedAt = 123000),
+            TimelineItem("user-2", TimelineKind.USER, body = "two"),
+            TimelineItem("file-2", TimelineKind.FILE_CHANGE, status = "completed", fileChanges = listOf(secondFile)),
+            TimelineItem("answer-2", TimelineKind.AGENT, body = "done again"),
+        ))
+        assertFalse(rows.any { it.item.kind == TimelineKind.FILE_CHANGE })
+        assertTrue(rows.first { it.item.id == "comment" }.footerFiles.isEmpty())
+        assertEquals(listOf(firstFile.copy(diff = "+first\n+next")), rows.first { it.item.id == "answer-1" }.footerFiles)
+        assertEquals(listOf(secondFile), rows.first { it.item.id == "answer-2" }.footerFiles)
+        assertEquals(20000L, rows.first { it.item.id == "answer-1" }.item.elapsedMs)
+        assertEquals("Took 51 min 54 s", formatTurnElapsed(3114000))
+    }
+
+    @Test
+    fun runningAndFailedFileChangesStayVisibleUntilReplyCompletes() {
+        val rows = conversationPresentation(listOf(
+            TimelineItem("file", TimelineKind.FILE_CHANGE, status = "inProgress",
+                fileChanges = listOf(FileChangeSummary("a.kt", "update", "+next")), turnId = "t"),
+            TimelineItem("answer", TimelineKind.AGENT, body = "partial", status = "inProgress", turnId = "t"),
+        ))
+        assertTrue(rows.any { it.item.id == "file" })
+        assertTrue(rows.last().footerFiles.isEmpty())
+    }
+
     @Test
     fun remotePathNavigationSupportsPosixAndWindowsHosts() {
         assertEquals("/srv/app/src", appendRemotePath("/srv/app/", "src"))

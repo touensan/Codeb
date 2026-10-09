@@ -3,11 +3,11 @@ package com.codex.remote.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.KeyboardArrowDown
 import androidx.compose.material3.*
@@ -15,6 +15,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.codex.remote.R
@@ -42,9 +46,9 @@ internal fun effortDescription(value: String, fallback: String = ""): String = w
     else -> fallback
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun ModelConfigurationSheet(
+internal fun ModelConfigurationMenu(
+    expanded: Boolean,
     models: List<RemoteModel>,
     selectedModel: String?,
     effort: String?,
@@ -53,63 +57,114 @@ internal fun ModelConfigurationSheet(
     onEffort: (String) -> Unit,
     onTier: (String?) -> Unit = {},
     onDismiss: () -> Unit,
-    providerSelector: @Composable () -> Unit = {},
+    providers: List<Pair<String, String>> = emptyList(),
+    providerId: String? = null,
+    onProvider: (String) -> Unit = {},
+    onAddProvider: () -> Unit = {},
 ) {
     val model = models.firstOrNull { it.id == selectedModel }
-    var effortMenu by remember { mutableStateOf(false) }
-    var speedMenu by remember { mutableStateOf(false) }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
-        containerColor = MaterialTheme.colorScheme.background) {
-        Text(uiText(R.string.configuration, "Configuration"), Modifier.align(Alignment.CenterHorizontally).padding(bottom = 18.dp),
-            style = MaterialTheme.typography.titleLarge)
-        providerSelector()
-        LazyColumn(Modifier.fillMaxWidth().weight(1f, fill = false).heightIn(max = 420.dp).padding(horizontal = 24.dp)
-            .clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
-            items(models, key = { it.id }) { candidate ->
-                Row(Modifier.fillMaxWidth().clickable { onModel(candidate.id) }.padding(horizontal = 18.dp, vertical = 18.dp),
-                    verticalAlignment = Alignment.CenterVertically) {
-                    Text(candidate.displayName, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    if (candidate.id == selectedModel) Icon(Icons.Outlined.Check, null, Modifier.size(24.dp))
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.background, thickness = 2.dp)
-            }
+    var page by remember { mutableStateOf("reasoning") }
+    var providersExpanded by remember { mutableStateOf(false) }
+    LaunchedEffect(expanded) { if (!expanded) page = "reasoning" }
+    val speed = model?.serviceTiers?.firstOrNull { it.id == serviceTier }
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        modifier = Modifier.width(280.dp).heightIn(max = 500.dp).testTag("model-configuration-menu"),
+        properties = PopupProperties(focusable = false),
+        shape = RoundedCornerShape(20.dp),
+    ) {
+        if (page != "reasoning") {
+            DropdownMenuItem(
+                text = { Text(when (page) {
+                    "model" -> uiText(R.string.ui_191, "Model")
+                    else -> uiText(R.string.ui_197, "Speed")
+                }) },
+                leadingIcon = { Icon(Icons.AutoMirrored.Outlined.ArrowBack, uiText(R.string.ui_002, "Back")) },
+                onClick = { page = "reasoning"; providersExpanded = false },
+            )
+            HorizontalDivider(Modifier.padding(horizontal = 12.dp))
         }
-        Spacer(Modifier.height(24.dp))
-        Box(Modifier.padding(horizontal = 24.dp)) {
-            ConfigurationRow(uiText(R.string.ui_193, "Reasoning"), effort?.displayEffort() ?: uiText(R.string.ui_262, "Default reasoning"),
-                enabled = model?.supportedReasoningEfforts?.isNotEmpty() == true, onClick = { effortMenu = true })
-            DropdownMenu(effortMenu, { effortMenu = false }, Modifier.widthIn(max = 300.dp)) {
-                model?.supportedReasoningEfforts.orEmpty().forEach { option ->
-                    DropdownMenuItem(text = {
-                        Column {
-                            Text(option.value.displayEffort())
-                            Text(effortDescription(option.value, option.description), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }, onClick = { onEffort(option.value); effortMenu = false },
-                        trailingIcon = { if (option.value == effort) Icon(Icons.Outlined.Check, null) })
+        when (page) {
+            "model" -> {
+                if (providers.isNotEmpty()) Box(Modifier.padding(horizontal = 12.dp).testTag("api-provider-selector")) {
+                    ConfigurationRow(uiText(R.string.api_provider, "API provider"), providers.firstOrNull { it.first == providerId }?.second.orEmpty()) { providersExpanded = !providersExpanded }
                 }
-            }
-        }
-        if (model?.supportedReasoningEfforts.isNullOrEmpty()) Text(uiText(R.string.capabilities_unknown, "Reasoning options not reported"),
-            Modifier.padding(horizontal = 40.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (model?.serviceTiers?.isNotEmpty() == true) {
-            Spacer(Modifier.height(24.dp))
-            Box(Modifier.padding(horizontal = 24.dp)) {
-                ConfigurationRow(uiText(R.string.ui_197, "Speed"), model.serviceTiers.firstOrNull { it.id == serviceTier }?.let {
-                    if (it.id.equals("fast", true)) uiText(R.string.ui_195, "Fast") else it.name
-                } ?: uiText(R.string.ui_198, "Standard")) { speedMenu = true }
-                DropdownMenu(speedMenu, { speedMenu = false }) {
-                    DropdownMenuItem(text = { Text(uiText(R.string.ui_198, "Standard")) }, onClick = { onTier(null); speedMenu = false },
-                        trailingIcon = { if (serviceTier == null) Icon(Icons.Outlined.Check, null) })
-                    model.serviceTiers.forEach { tier ->
-                        DropdownMenuItem(text = { Text(if (tier.id.equals("fast", true)) uiText(R.string.ui_195, "Fast") else tier.name) }, onClick = { onTier(tier.id); speedMenu = false },
-                            trailingIcon = { if (tier.id == serviceTier) Icon(Icons.Outlined.Check, null) })
+                if (providersExpanded) Column(Modifier.testTag("api-provider-options")) {
+                    providers.forEach { (id, name) ->
+                        DropdownMenuItem(text = { Text(name) },
+                            trailingIcon = { if (id == providerId) Icon(Icons.Outlined.Check, null) },
+                            onClick = { onProvider(id); providersExpanded = false })
                     }
+                    DropdownMenuItem(text = { Text(uiText(R.string.ui_261, "Add API provider")) },
+                        onClick = { onDismiss(); onAddProvider() })
+                } else models.forEach { candidate ->
+                    DropdownMenuItem(
+                        modifier = Modifier.semantics { selected = candidate.id == selectedModel },
+                        text = { Text(candidate.displayName, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+                        trailingIcon = { if (candidate.id == selectedModel) Icon(Icons.Outlined.Check, null) },
+                        onClick = { onModel(candidate.id); page = "reasoning" },
+                    )
                 }
             }
-        }
-        Button(onClick = onDismiss, shape = CircleShape, modifier = Modifier.fillMaxWidth().padding(24.dp).height(52.dp)) {
-            Text(uiText(R.string.done, "Done"), style = MaterialTheme.typography.titleMedium)
+            "speed" -> {
+                DropdownMenuItem(
+                    modifier = Modifier.semantics { selected = serviceTier == null },
+                    text = { Text(uiText(R.string.ui_198, "Standard")) },
+                    trailingIcon = { if (serviceTier == null) Icon(Icons.Outlined.Check, null) },
+                    onClick = { onTier(null); onDismiss() },
+                )
+                model?.serviceTiers.orEmpty().forEach { tier ->
+                    DropdownMenuItem(
+                        modifier = Modifier.semantics { selected = tier.id == serviceTier },
+                        text = {
+                            Column {
+                                Text(if (tier.id.equals("fast", true)) uiText(R.string.ui_195, "Fast") else tier.name)
+                                if (tier.description.isNotBlank()) Text(tier.description,
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        },
+                        trailingIcon = { if (tier.id == serviceTier) Icon(Icons.Outlined.Check, null) },
+                        onClick = { onTier(tier.id); onDismiss() },
+                    )
+                }
+            }
+            else -> {
+                if (!model?.supportedReasoningEfforts.isNullOrEmpty()) Text(uiText(R.string.ui_193, "Reasoning"), Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                model?.supportedReasoningEfforts.orEmpty().forEach { option ->
+                    DropdownMenuItem(
+                        modifier = Modifier.semantics { selected = option.value == effort },
+                        text = { Text(option.value.displayEffort()) },
+                        trailingIcon = { if (option.value == effort) Icon(Icons.Outlined.Check, null) },
+                        onClick = { onEffort(option.value); onDismiss() },
+                    )
+                }
+                if (!model?.supportedReasoningEfforts.isNullOrEmpty()) HorizontalDivider(Modifier.padding(horizontal = 12.dp))
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(uiText(R.string.ui_191, "Model"))
+                            Text(model?.displayName ?: selectedModel.orEmpty(), style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    },
+                    trailingIcon = { Icon(Icons.Outlined.ChevronRight, null) },
+                    onClick = { page = "model" },
+                )
+                if (model?.serviceTiers?.isNotEmpty() == true) DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(uiText(R.string.ui_197, "Speed"))
+                            Text(if (speed?.id.equals("fast", true)) uiText(R.string.ui_195, "Fast")
+                                else speed?.name ?: uiText(R.string.ui_198, "Standard"),
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    },
+                    trailingIcon = { Icon(Icons.Outlined.ChevronRight, null) },
+                    onClick = { page = "speed" },
+                )
+            }
         }
     }
 }

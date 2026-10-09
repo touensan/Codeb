@@ -16,7 +16,10 @@ import kotlinx.serialization.json.JsonArray
 enum class ApiProtocol { CHAT_COMPLETIONS, RESPONSES }
 
 @Serializable
-data class ApiModel(val id: String, val efforts: List<String> = emptyList())
+data class ApiModel(val id: String, val efforts: List<String> = emptyList(), val effortsReported: Boolean = false, val test: ApiModelTest? = null)
+
+@Serializable
+data class ApiModelTest(val outcome: String, val detail: String, val checkedAt: Long = System.currentTimeMillis())
 
 @Serializable
 data class ApiProvider(
@@ -31,7 +34,11 @@ data class ApiProvider(
 )
 
 @Serializable
-data class LocalMessage(val id: String = UUID.randomUUID().toString(), val role: String, val text: String)
+data class LocalMessage(val id: String = UUID.randomUUID().toString(), val role: String, val text: String,
+    val attachments: List<LocalAttachment> = emptyList(), val completedAt: Long? = null)
+
+@Serializable
+data class LocalAttachment(val id: String = UUID.randomUUID().toString(), val name: String, val kind: String, val data: String)
 
 @Serializable
 data class LocalConversation(
@@ -39,10 +46,14 @@ data class LocalConversation(
     val title: String = uiText(R.string.ui_259, "New chat"),
     val workspace: Boolean = false,
     val providerId: String = "",
+    val model: String = "",
+    val effort: String? = null,
     val messages: List<LocalMessage> = emptyList(),
     val updatedAt: Long = System.currentTimeMillis(),
+    val lastOpenedAt: Long = updatedAt,
     val archived: Boolean = false,
     val draft: String = "",
+    val attachments: List<LocalAttachment> = emptyList(),
     val compactedInput: JsonArray? = null,
     val compactedCount: Int = 0,
     val compactedProvider: String = "",
@@ -67,9 +78,16 @@ class ApiStore(context: Context) {
         if (!conversation.workspace && expectedGeneration != storage.cacheGeneration) return@locked
         val file = conversationFile(conversation.id, conversation.workspace)
         val existing = storage.read(file, LocalConversation.serializer())
+        if (existing == null && conversation.messages.isEmpty() && conversation.draft.isBlank() && conversation.attachments.isEmpty() && !hasArtifacts(conversation)) return@locked
         if (existing != null && existing.revision > conversation.revision) return@locked
         storage.write(file, LocalConversation.serializer(), conversation)
     }
+
+    fun conversation(id: String, workspace: Boolean): LocalConversation? =
+        storage.read(conversationFile(id, workspace), LocalConversation.serializer())
+
+    private fun hasArtifacts(conversation: LocalConversation): Boolean = conversation.workspace &&
+        File(File(storage.workspaceRoot, safeKey(conversation.id)), "files").walkTopDown().any { it.isFile }
 
     fun list(workspace: Boolean): List<LocalConversation> {
         val root = if (workspace) storage.workspaceRoot else File(storage.cacheRoot, "chats")
@@ -77,7 +95,12 @@ class ApiStore(context: Context) {
         return root.walkTopDown().filter { it.isFile }
             .map { if (it.name.endsWith(".bak")) File(it.path.removeSuffix(".bak")) else it }
             .filter { it.name == "conversation.json" || !workspace && it.extension == "json" }.distinctBy { it.path }
-            .mapNotNull { storage.read(it, LocalConversation.serializer()) }.toList().sortedByDescending { it.updatedAt }
+            .mapNotNull { storage.read(it, LocalConversation.serializer()) }
+            .filter { conversation -> conversation.messages.any { it.role == "user" && (it.text.isNotBlank() || it.attachments.isNotEmpty()) } || hasArtifacts(conversation) }
+            .map { conversation ->
+                val firstPrompt = conversation.messages.firstOrNull { it.role == "user" && it.text.isNotBlank() }?.text
+                if (firstPrompt != null && conversation.title in setOf("New chat", "新聊天", "新しいチャット")) conversation.copy(title = firstPrompt.trim().take(80)) else conversation
+            }.toList().sortedByDescending { it.updatedAt }
     }
 
     fun artifacts(id: String): File = File(File(storage.workspaceRoot, safeKey(id)), "files").apply {

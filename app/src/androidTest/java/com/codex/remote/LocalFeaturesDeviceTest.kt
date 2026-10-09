@@ -103,4 +103,35 @@ class LocalFeaturesDeviceTest {
             assertFalse(logs.contains("secret-api-key-do-not-echo"))
         } finally { DebugApi.enable(wasEnabled) }
     }
+
+    @Test fun emptyChatsStayHiddenWhileDraftsAndWorkspaceArtifactsRemainRecoverable() {
+        val context = object : android.content.ContextWrapper(app) {
+            private val root = File(app.filesDir, "empty-check-${UUID.randomUUID()}").apply { mkdirs() }
+            override fun getFilesDir(): File = root
+        }
+        val api = ApiStore(context)
+        val storage = LocalStore(context)
+        val blank = LocalConversation()
+        api.save(blank)
+        assertFalse(api.conversationFile(blank.id, false).exists())
+        val draft = blank.copy(draft = "unsent draft", revision = 1)
+        api.save(draft)
+        assertTrue(api.list(false).isEmpty())
+        assertEquals("unsent draft", api.conversation(draft.id, false)!!.draft)
+        val legacy = LocalConversation(messages = listOf(LocalMessage(role = "assistant", text = "old generated placeholder")))
+        storage.write(api.conversationFile(legacy.id, false), LocalConversation.serializer(), legacy)
+        assertTrue(api.list(false).isEmpty())
+        assertTrue(api.conversationFile(legacy.id, false).exists())
+        api.save(draft.copy(messages = listOf(LocalMessage(role = "user", text = "Actual first prompt")), revision = 2))
+        assertEquals("Actual first prompt", api.list(false).single().title)
+        val workspace = LocalConversation(workspace = true)
+        api.save(workspace)
+        assertFalse(api.conversationFile(workspace.id, true).exists())
+        val artifact = File(api.artifacts(workspace.id), "imported.txt").apply { writeText("keep this file") }
+        api.save(workspace)
+        assertEquals(workspace.id, api.list(true).single().id)
+        storage.clearCache()
+        assertEquals("keep this file", artifact.readText())
+        assertEquals(workspace.id, api.list(true).single().id)
+    }
 }

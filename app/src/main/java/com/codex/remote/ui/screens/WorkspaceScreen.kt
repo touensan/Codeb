@@ -3,7 +3,7 @@ package com.codex.remote.ui.screens
 import com.codex.remote.R
 import com.codex.remote.ui.uiText
 import com.codex.remote.ui.displayEffort
-import com.codex.remote.ui.ModelConfigurationSheet
+import com.codex.remote.ui.ModelConfigurationMenu
 
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Sort
@@ -14,7 +14,9 @@ import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.FrontHand
 import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.rememberUpdatedState
+import kotlinx.coroutines.flow.conflate
 
 import android.content.Context
 import android.text.method.LinkMovementMethod
@@ -25,11 +27,20 @@ import android.widget.TextView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.interaction.collectIsDraggedAsState
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.gestures.scrollBy
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -50,6 +61,7 @@ import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -76,6 +88,8 @@ import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.AttachFile
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Bolt
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Code
@@ -121,6 +135,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.LinearProgressIndicator
@@ -161,6 +176,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.text.font.FontFamily
@@ -251,8 +267,11 @@ fun WorkspaceScreen(
     onTrustHostKey: () -> Unit,
     onRejectHostKey: () -> Unit,
     onDismissNotice: () -> Unit,
+    onCreateRemoteDirectory: (String, String) -> Unit = { _, _ -> },
     navigation: @Composable () -> Unit = {},
+    sidebarContent: (@Composable (Boolean, () -> Unit) -> Unit)? = null,
     hostSelector: @Composable () -> Unit = { Text("Codex", style = MaterialTheme.typography.titleLarge) },
+    startOnTasksPage: Boolean = state.selectedThreadId == null,
 ) {
     val drawerState = androidx.compose.material3.rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -261,6 +280,51 @@ fun WorkspaceScreen(
     var archiveTarget by remember { mutableStateOf<RemoteThread?>(null) }
     var showArchivedTasks by remember { mutableStateOf(false) }
     var deleteArchivedTarget by remember { mutableStateOf<RemoteThread?>(null) }
+    var showAccountStatus by remember { mutableStateOf(false) }
+    var showingTasks by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(startOnTasksPage) }
+    var openingProject by remember { mutableStateOf(false) }
+    var switchingProject by remember { mutableStateOf(false) }
+    val openProject = {
+        openingProject = true
+        onLoadRemoteDirectory(state.selectedProjectPath ?: state.projects.firstOrNull()?.path ?: if (state.activeConnection?.platform == com.codex.remote.domain.RemotePlatform.WINDOWS) "C:/" else "/")
+    }
+    if (switchingProject) AlertDialog(
+        onDismissRequest = { switchingProject = false },
+        title = { Text(uiText(R.string.change_project, "Change project")) },
+        text = {
+            LazyColumn(Modifier.heightIn(max = 360.dp)) {
+                items(state.projects, key = { it.path }) { project ->
+                    Row(Modifier.fillMaxWidth().clickable {
+                        onSelectProject(project)
+                        switchingProject = false
+                    }.testTag("switch-project-${project.path}").padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(project.name)
+                            Text(project.path, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if (project.path == state.selectedProjectPath) Icon(Icons.Outlined.Check, null)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = { switchingProject = false; openProject() },
+            enabled = state.connectionStatus == ConnectionStatus.CONNECTED, modifier = Modifier.testTag("choose-other-project-folder")) {
+            Text(uiText(R.string.choose_project_folder, "Choose another folder"))
+        } },
+        dismissButton = { TextButton(onClick = { switchingProject = false }) { Text(uiText(R.string.ui_008, "取消")) } },
+    )
+    if (openingProject) RemotePathPickerDialog(state,
+        projectRoot = if (state.activeConnection?.platform == com.codex.remote.domain.RemotePlatform.WINDOWS) "C:/" else "/",
+        onNavigate = onLoadRemoteDirectory,
+        onSelect = { path ->
+            onSelectProject(RemoteProject(id = path, name = path.trimEnd('/', '\\').substringAfterLast('/').substringAfterLast('\\').ifBlank { path }, path = path, threads = emptyList(), updatedAt = 0))
+            openingProject = false
+            showingTasks = false
+            onClearRemoteDirectory()
+        },
+        onDismiss = { openingProject = false; onClearRemoteDirectory() }, directoriesOnly = true,
+        onCreateDirectory = onCreateRemoteDirectory)
+    BackHandler(enabled = !showingTasks) { showingTasks = true }
     LaunchedEffect(state.mcpAuthorizationUrl) {
         val authorizationUrl = state.mcpAuthorizationUrl ?: return@LaunchedEffect
         try {
@@ -279,6 +343,7 @@ fun WorkspaceScreen(
                     navigation = navigation,
                     modifier = Modifier.width(286.dp).fillMaxHeight(),
                     onNewThread = onNewThread,
+                    onOpenProject = openProject,
                     onSelectProject = onSelectProject,
                     onSelectThread = onSelectThread,
                     onRenameThread = { renameTarget = it },
@@ -322,6 +387,7 @@ fun WorkspaceScreen(
                     onSetPermissionProfile = onSetPermissionProfile,
                     onSetPermissionMode = onSetPermissionMode,
                     onLoadRemoteDirectory = onLoadRemoteDirectory,
+                    onChangeProject = { switchingProject = true },
                     onClearRemoteDirectory = onClearRemoteDirectory,
                     onStartLogin = onStartLogin,
                     onOpenConnections = onOpenConnections,
@@ -337,21 +403,40 @@ fun WorkspaceScreen(
                         modifier = Modifier.widthIn(max = 330.dp),
                         drawerContainerColor = MaterialTheme.colorScheme.background,
                     ) {
-                        WorkspaceSidebar(
+                        if (sidebarContent != null) sidebarContent(drawerState.isOpen) { scope.launch { drawerState.close() } } else Column(Modifier.fillMaxSize().statusBarsPadding()) {
+                            Text("Codex Remote", Modifier.padding(24.dp), style = MaterialTheme.typography.titleLarge)
+                            navigation()
+                            Spacer(Modifier.weight(1f))
+                            SidebarAction(Icons.Outlined.Computer, state.activeConnection?.name.orEmpty(), onOpenConnections)
+                            SidebarAction(Icons.Outlined.Tune, uiText(R.string.remaining_limits, "Remaining usage")) {
+                                showAccountStatus = true
+                                onShowStatus()
+                                scope.launch { drawerState.close() }
+                            }
+                            Spacer(Modifier.navigationBarsPadding())
+                        }
+                    }
+                },
+            ) {
+                if (showingTasks) WorkspaceSidebar(
                             state = state,
-                            navigation = navigation,
+                            navigation = {},
+                            pageHeader = hostSelector,
+                            onOpenNavigation = { scope.launch { drawerState.open() } },
+                            showAccount = false,
                             modifier = Modifier.fillMaxSize(),
                             onNewThread = {
-                                onNewThread()
-                                scope.launch { drawerState.close() }
+                                if (state.selectedProjectPath == null && state.projects.isEmpty()) openProject()
+                                else { onNewThread(); showingTasks = false }
                             },
+                            onOpenProject = openProject,
                             onSelectProject = {
                                 onSelectProject(it)
                                 scope.launch { drawerState.close() }
                             },
                             onSelectThread = {
                                 onSelectThread(it)
-                                scope.launch { drawerState.close() }
+                                showingTasks = false
                             },
                             onRenameThread = { renameTarget = it },
                             onArchiveThread = { archiveTarget = it },
@@ -370,14 +455,12 @@ fun WorkspaceScreen(
                                 onShowStatus()
                             },
                         )
-                    }
-                },
-            ) {
+                else
                 WorkspaceContent(
                     state = state,
                     hostSelector = hostSelector,
                     showMenu = true,
-                    onMenu = { scope.launch { drawerState.open() } },
+                    onMenu = { showingTasks = true },
                     onSend = onSend,
                     onStop = onStop,
                     onLoadOlderHistory = onLoadOlderHistory,
@@ -403,6 +486,7 @@ fun WorkspaceScreen(
                     onSetPermissionProfile = onSetPermissionProfile,
                     onSetPermissionMode = onSetPermissionMode,
                     onLoadRemoteDirectory = onLoadRemoteDirectory,
+                    onChangeProject = { switchingProject = true },
                     onClearRemoteDirectory = onClearRemoteDirectory,
                     onStartLogin = onStartLogin,
                     onOpenConnections = onOpenConnections,
@@ -413,13 +497,14 @@ fun WorkspaceScreen(
         }
     }
 
+    if (showAccountStatus) RemoteStatusDialog(state, onDismiss = { showAccountStatus = false })
     state.pendingApproval?.let { approval ->
         ApprovalDialog(
             approval = approval,
             onDecision = onApproval,
         )
     }
-    state.pendingHostKeyFingerprint?.let { fingerprint ->
+    state.pendingHostKeyFingerprint?.takeIf { sidebarContent == null }?.let { fingerprint ->
         HostKeyConfirmationDialog(
             host = state.activeConnection?.let { "${it.host}:${it.port}" }.orEmpty(),
             fingerprint = fingerprint,
@@ -445,8 +530,8 @@ fun WorkspaceScreen(
         )
     }
     archiveTarget?.let { thread ->
-        ArchiveThreadDialog(
-            thread = thread,
+        ArchiveConfirmationDialog(
+            title = thread.title, remote = true,
             onDismiss = { archiveTarget = null },
             onArchive = {
                 onArchiveThread(thread)
@@ -481,6 +566,7 @@ private fun WorkspaceSidebar(
     navigation: @Composable () -> Unit,
     modifier: Modifier,
     onNewThread: () -> Unit,
+    onOpenProject: () -> Unit = {},
     onSelectProject: (RemoteProject) -> Unit,
     onSelectThread: (RemoteThread) -> Unit,
     onRenameThread: (RemoteThread) -> Unit,
@@ -489,11 +575,15 @@ private fun WorkspaceSidebar(
     onOpenArchivedTasks: () -> Unit,
     onOpenConnections: () -> Unit,
     onShowStatus: () -> Unit,
+    pageHeader: (@Composable () -> Unit)? = null,
+    onOpenNavigation: () -> Unit = {},
+    showAccount: Boolean = true,
 ) {
     val preferences = LocalContext.current.getSharedPreferences("remote-view", 0)
     var sortMode by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(preferences.getString("sort", "project") ?: "project") }
     var activityView by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(preferences.getBoolean("activity", false)) }
     var sortMenu by remember { mutableStateOf(false) }
+    var searchOpen by remember { mutableStateOf(false) }
     LaunchedEffect(sortMode, activityView) { preferences.edit().putString("sort", sortMode).putBoolean("activity", activityView).apply() }
     val expandedProjects = remember(state.activeConnection?.id) { mutableStateMapOf<String, Boolean>() }
     var searchQuery by remember(state.activeConnection?.id) { mutableStateOf("") }
@@ -516,9 +606,13 @@ private fun WorkspaceSidebar(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Outlined.Terminal, contentDescription = null, modifier = Modifier.size(23.dp))
-            Spacer(Modifier.width(9.dp))
-            Text("Codex", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            if (pageHeader != null) {
+                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer) {
+                    IconButton(onClick = onOpenNavigation) { Icon(Icons.Outlined.Menu, uiText(R.string.ui_073, "Open conversations")) }
+                }
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { pageHeader() }
+                IconButton(onClick = { searchOpen = !searchOpen }) { Icon(Icons.Outlined.Search, uiText(R.string.ui_054, "Search tasks")) }
+            } else Text("Codex", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
             IconButton(onClick = { activityView = !activityView }) {
                 Icon(Icons.Outlined.Notifications, contentDescription = if (activityView) uiText(R.string.ui_046, "Close activity view") else uiText(R.string.ui_047, "Activity view"),
                     tint = if (activityView) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface)
@@ -534,9 +628,28 @@ private fun WorkspaceSidebar(
             }
         }
         navigation()
-        SidebarAction(Icons.Outlined.Add, uiText(R.string.ui_052, "New task"), onNewThread)
-        SidebarAction(Icons.Outlined.Archive, uiText(R.string.ui_053, "Archived tasks"), onOpenArchivedTasks)
-        OutlinedTextField(
+        if (pageHeader != null) Row(Modifier.padding(horizontal = 18.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceVariant) {
+                Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Terminal, null, Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text(state.activeConnection?.name.orEmpty(), style = MaterialTheme.typography.labelLarge)
+                }
+            }
+            Spacer(Modifier.width(12.dp))
+            ConnectionIndicator(state)
+        }
+        Row {
+            TextButton(onClick = onNewThread) { Icon(Icons.Outlined.Add, null); Text(uiText(R.string.ui_052, "New task")) }
+            TextButton(onClick = onOpenArchivedTasks) { Icon(Icons.Outlined.Archive, null); Text(uiText(R.string.ui_053, "Archived tasks")) }
+        }
+        TextButton(onClick = onOpenProject, enabled = state.connectionStatus == ConnectionStatus.CONNECTED,
+            modifier = Modifier.testTag("open-remote-project")) {
+            Icon(Icons.Outlined.FolderOpen, null)
+            Spacer(Modifier.width(6.dp))
+            Text(uiText(R.string.open_project, "Open project"))
+        }
+        if (searchOpen || pageHeader == null) OutlinedTextField(
             value = searchQuery,
             onValueChange = { searchQuery = it },
             modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 6.dp),
@@ -639,6 +752,7 @@ private fun WorkspaceSidebar(
                 }
             }
         }
+        if (showAccount) {
         HorizontalDivider()
         Column(Modifier.fillMaxWidth().clickable(onClick = onShowStatus).padding(horizontal = 18.dp, vertical = 10.dp)) {
             Text(uiText(R.string.remaining_limits, "Remaining usage"), style = MaterialTheme.typography.labelMedium,
@@ -681,6 +795,7 @@ private fun WorkspaceSidebar(
             Icon(Icons.Outlined.Settings, contentDescription = uiText(R.string.ui_063, "连接设置"), modifier = Modifier.size(18.dp))
         }
         Spacer(Modifier.navigationBarsPadding())
+        }
     }
 }
 
@@ -718,8 +833,8 @@ private fun ThreadSidebarRow(
             )
             Spacer(Modifier.width(4.dp))
         }
-        if (thread.status.contains("active", true)) {
-            Box(Modifier.size(6.dp).clip(CircleShape).background(MaterialTheme.colorScheme.secondary))
+        if (thread.status.contains("active", true) || thread.status.contains("running", true) || thread.status.contains("inProgress", true)) {
+            CircularProgressIndicator(Modifier.size(15.dp).testTag("thread-running-${thread.id}"), strokeWidth = 2.dp)
         }
         Box {
             IconButton(onClick = { menuOpen = true }, modifier = Modifier.size(34.dp)) {
@@ -847,6 +962,7 @@ private fun WorkspaceContent(
     onSetPermissionProfile: (String?) -> Unit,
     onSetPermissionMode: (PermissionMode) -> Unit,
     onLoadRemoteDirectory: (String) -> Unit,
+    onChangeProject: () -> Unit,
     onClearRemoteDirectory: () -> Unit,
     onStartLogin: () -> Unit,
     onOpenConnections: () -> Unit,
@@ -888,111 +1004,62 @@ private fun WorkspaceContent(
         contentWindowInsets = WindowInsets.safeDrawing,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            Surface(
-                modifier = Modifier.statusBarsPadding(),
-                color = MaterialTheme.colorScheme.background,
+            Row(
+                modifier = Modifier.fillMaxWidth().statusBarsPadding().height(72.dp).padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Column {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().height(72.dp).padding(horizontal = 16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (showMenu) {
-                            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer) {
-                                IconButton(onClick = onMenu) {
-                                    Icon(if (state.selectedThreadId != null) Icons.AutoMirrored.Outlined.ArrowBack else Icons.Outlined.Menu,
-                                        contentDescription = if (state.selectedThreadId != null) uiText(R.string.ui_002, "Back") else uiText(R.string.ui_073, "Open conversations"))
-                                }
-                            }
-                        }
-                        if (state.selectedThreadId == null) Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                            hostSelector()
-                        } else Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
-                            Text(currentThread?.title ?: state.timeline.firstOrNull { it.kind == TimelineKind.USER }?.body.orEmpty(),
-                                style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            ConnectionIndicator(state)
-                        }
-                        if (state.selectedThreadId != null) {
-                            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    IconButton(onClick = onNewThread) { Icon(Icons.Outlined.EditNote, uiText(R.string.ui_052, "New task")) }
-                                    ThreadHeaderOverflow(onRename = onRenameCurrentThread, onCompact = onCompactThread,
-                                        compactEnabled = !state.isTurnRunning, onFork = onForkThread,
-                                        onReview = { showReviewDialog = true }, onArchive = onArchiveCurrentThread)
-                                }
-                            }
-                        } else IconButton(onClick = onMenu) { Icon(Icons.Outlined.Search, uiText(R.string.ui_054, "Search tasks")) }
+                if (showMenu) Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.9f)) {
+                    IconButton(onClick = onMenu) {
+                        Icon(if (state.selectedThreadId != null) Icons.AutoMirrored.Outlined.ArrowBack else Icons.Outlined.Menu,
+                            contentDescription = if (state.selectedThreadId != null) uiText(R.string.ui_002, "Back") else uiText(R.string.ui_073, "Open conversations"))
                     }
-                    HorizontalDivider()
                 }
+                if (state.selectedThreadId == null) Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) { hostSelector(); ConnectionIndicator(state) }
+                } else Surface(
+                    modifier = Modifier.weight(1f).testTag("conversation-header"),
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.9f),
+                ) {
+                    Column(Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+                        Text(currentThread?.title ?: state.timeline.firstOrNull { it.kind == TimelineKind.USER }?.body.orEmpty(),
+                            style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        ConnectionIndicator(state)
+                    }
+                }
+                if (state.selectedThreadId != null) Surface(shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.9f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onNewThread) { Icon(Icons.Outlined.EditNote, uiText(R.string.ui_052, "New task")) }
+                        ThreadHeaderOverflow(onRename = onRenameCurrentThread, onCompact = onCompactThread,
+                            compactEnabled = canCompose && !state.isTurnRunning, onFork = onForkThread,
+                            onReview = { showReviewDialog = true }, onArchive = onArchiveCurrentThread)
+                    }
+                } else IconButton(onClick = onMenu) { Icon(Icons.Outlined.Search, uiText(R.string.ui_054, "Search tasks")) }
             }
         },
     ) { padding ->
-        if (state.connectionStatus != ConnectionStatus.CONNECTED && state.timeline.isNotEmpty()) {
-            Column(Modifier.fillMaxSize().padding(padding)) {
-                Text(state.connectionMessage, Modifier.padding(12.dp), style = MaterialTheme.typography.bodySmall)
-                Conversation(state, conversationListState, followLatest, { followLatest = it }, hasPositionedConversation,
-                    { hasPositionedConversation = true }, Modifier.fillMaxWidth().weight(1f), onLoadOlderHistory)
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            if (state.isReadOnlyThread) Text(uiText(R.string.ui_078, "Another Codex process owns this task. History is syncing in read-only mode."),
+                Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
+            when {
+                state.connectionStatus == ConnectionStatus.CONNECTED && state.remoteAccount?.canRunCodex != true && state.timeline.isEmpty() ->
+                    RemoteAuthenticationState(state.isLoginStarting, onStartLogin, Modifier.fillMaxWidth().weight(1f))
+                state.connectionStatus == ConnectionStatus.CONNECTED && state.models.isEmpty() && state.timeline.isEmpty() ->
+                    ConnectionState(Icons.Outlined.ErrorOutline, uiText(R.string.ui_076, "No remote models"),
+                        uiText(R.string.ui_077, "远端 app-server 没有返回可用模型。请检查远端 Codex 版本和模型提供方配置。"),
+                        false, modifier = Modifier.fillMaxWidth().weight(1f))
+                state.connectionStatus == ConnectionStatus.ERROR && state.timeline.isEmpty() ->
+                    ConnectionState(Icons.Outlined.ErrorOutline, uiText(R.string.ui_075, "Connection failed"),
+                        state.connectionMessage, false, action = onOpenConnections, modifier = Modifier.fillMaxWidth().weight(1f))
+                else -> Conversation(state, conversationListState, followLatest, { followLatest = it }, hasPositionedConversation,
+                    { hasPositionedConversation = true }, Modifier.fillMaxWidth().weight(1f), onLoadOlderHistory, onChangeProject)
             }
-        } else when (state.connectionStatus) {
-            ConnectionStatus.CONNECTING -> ConnectionState(
-                icon = null,
-                title = uiText(R.string.ui_074, "Connecting over SSH"),
-                detail = state.connectionMessage,
-                loading = true,
-                modifier = Modifier.fillMaxSize().padding(padding),
-            )
-            ConnectionStatus.ERROR -> ConnectionState(
-                icon = Icons.Outlined.ErrorOutline,
-                title = uiText(R.string.ui_075, "Connection failed"),
-                detail = state.connectionMessage,
-                loading = false,
-                action = onOpenConnections,
-                modifier = Modifier.fillMaxSize().padding(padding),
-            )
-            ConnectionStatus.CONNECTED -> when {
-                state.remoteAccount?.canRunCodex != true -> RemoteAuthenticationState(
-                    loading = state.isLoginStarting,
-                    onLogin = onStartLogin,
-                    modifier = Modifier.fillMaxSize().padding(padding),
-                )
-                state.models.isEmpty() -> ConnectionState(
-                    icon = Icons.Outlined.ErrorOutline,
-                    title = uiText(R.string.ui_076, "No remote models"),
-                    detail = uiText(R.string.ui_077, "远端 app-server 没有返回可用模型。请检查远端 Codex 版本和模型提供方配置。"),
-                    loading = false,
-                    modifier = Modifier.fillMaxSize().padding(padding),
-                )
-                else -> Column(Modifier.fillMaxSize().padding(padding)) {
-                    if (state.isReadOnlyThread) Text(uiText(R.string.ui_078, "Another Codex process owns this task. History is syncing in read-only mode."),
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.bodySmall)
-                    Conversation(
-                        state = state,
-                        listState = conversationListState,
-                        followLatest = followLatest,
-                        onFollowLatestChange = { followLatest = it },
-                        hasPositionedConversation = hasPositionedConversation,
-                        onConversationPositioned = { hasPositionedConversation = true },
-                        modifier = Modifier.fillMaxWidth().weight(1f),
-                        onLoadOlderHistory = onLoadOlderHistory,
-                    )
-                    if (state.turnStartedAt > 0 && state.timeline.isNotEmpty()) {
-                        var elapsed by remember(state.turnStartedAt) { mutableStateOf(0L) }
-                        LaunchedEffect(state.isTurnRunning, state.turnStartedAt) {
-                            do {
-                                elapsed = (android.os.SystemClock.elapsedRealtime() - state.turnStartedAt).coerceAtLeast(0) / 1000
-                                if (state.isTurnRunning) kotlinx.coroutines.delay(1000)
-                            } while (state.isTurnRunning)
-                        }
-                        Text(uiText(if (state.isTurnRunning) R.string.running_seconds else R.string.elapsed_seconds,
-                            if (state.isTurnRunning) "Running %1\$d s" else "Took %1\$d s", elapsed),
-                            Modifier.padding(horizontal = 24.dp, vertical = 4.dp), style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                    if (canCompose) {
+            if (state.activeConnection != null && !state.isReadOnlyThread) {
                         Composer(
                             state = state,
-                            onSend = onSend,
+                            onSend = { text, mentions, images, goal -> followLatest = true; onSend(text, mentions, images, goal) },
                             onStop = onStop,
                             onCompactThread = onCompactThread,
                             onForkThread = onForkThread,
@@ -1027,19 +1094,10 @@ private fun WorkspaceContent(
                             onSetPermissionMode = onSetPermissionMode,
                             onLoadRemoteDirectory = onLoadRemoteDirectory,
                             onClearRemoteDirectory = onClearRemoteDirectory,
+                            sendEnabled = canCompose,
                             modifier = Modifier.fillMaxWidth(),
                         )
-                    }
-                }
             }
-            ConnectionStatus.DISCONNECTED -> ConnectionState(
-                icon = Icons.Outlined.Computer,
-                title = uiText(R.string.ui_079, "Disconnected"),
-                detail = state.activeConnection?.name.orEmpty(),
-                loading = false,
-                action = onOpenConnections,
-                modifier = Modifier.fillMaxSize().padding(padding),
-            )
         }
     }
     if (showGoalEditor) {
@@ -1134,16 +1192,19 @@ private fun ThreadHeaderOverflow(
 
 @Composable
 private fun ConnectionIndicator(state: AppUiState) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        val color = when (state.connectionStatus) {
-            ConnectionStatus.CONNECTED -> MaterialTheme.colorScheme.secondary
-            ConnectionStatus.ERROR -> MaterialTheme.colorScheme.error
-            else -> MaterialTheme.colorScheme.onSurfaceVariant
-        }
-        Box(Modifier.size(6.dp).clip(CircleShape).background(color))
+    val statusLabel = when (state.connectionStatus) {
+        ConnectionStatus.CONNECTED -> uiText(R.string.connection_connected, "Connected")
+        ConnectionStatus.CONNECTING -> uiText(R.string.ui_074, "Connecting over SSH")
+        ConnectionStatus.ERROR -> uiText(R.string.ui_075, "Connection failed")
+        ConnectionStatus.DISCONNECTED -> uiText(R.string.ui_079, "Disconnected")
+    }
+    Row(Modifier.semantics { contentDescription = "${state.activeConnection?.name.orEmpty()}: $statusLabel" },
+        verticalAlignment = Alignment.CenterVertically) {
+        HostConnectionDot(state.connectionStatus)
         Spacer(Modifier.width(6.dp))
         Text(
-            listOfNotNull(state.selectedProjectPath?.trimEnd('/')?.substringAfterLast('/'), state.activeConnection?.name).joinToString(" · "),
+            if (state.connectionStatus != ConnectionStatus.CONNECTED) statusLabel else
+                listOfNotNull(state.selectedProjectPath?.trimEnd('/')?.substringAfterLast('/'), state.activeConnection?.name).joinToString(" · "),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
@@ -1151,9 +1212,26 @@ private fun ConnectionIndicator(state: AppUiState) {
     }
 }
 
+@Composable
+internal fun HostConnectionDot(status: ConnectionStatus) {
+    val label = when (status) {
+        ConnectionStatus.CONNECTED -> uiText(R.string.connection_connected, "Connected")
+        ConnectionStatus.CONNECTING -> uiText(R.string.ui_074, "Connecting over SSH")
+        else -> uiText(R.string.ui_079, "Disconnected")
+    }
+    val modifier = Modifier.semantics { contentDescription = label }
+    if (status == ConnectionStatus.CONNECTING) CircularProgressIndicator(modifier.size(14.dp), strokeWidth = 1.5.dp)
+    else Box(modifier.size(7.dp).clip(CircleShape).background(if (status == ConnectionStatus.CONNECTED) Color(0xFF16835D) else MaterialTheme.colorScheme.error))
+}
+
 internal data class TimelinePresentationItem(
     val item: TimelineItem,
     val sourceItemIds: List<String>,
+    val footerFiles: List<FileChangeSummary> = emptyList(),
+    val isTurnReply: Boolean = false,
+    val turnKey: String = "",
+    val startsActivity: Boolean = false,
+    val turnElapsedMs: Long? = null,
 )
 
 private data class HistoryScrollAnchor(val itemId: String, val itemOffset: Int)
@@ -1168,7 +1246,7 @@ internal fun groupConsecutiveCommands(timeline: List<TimelineItem>): List<Timeli
             continue
         }
         var end = index + 1
-        while (end < timeline.size && timeline[end].kind == TimelineKind.COMMAND) end++
+        while (end < timeline.size && timeline[end].kind == TimelineKind.COMMAND && timeline[end].turnId == item.turnId) end++
         val commands = timeline.subList(index, end)
         if (commands.size == 1) {
             add(TimelinePresentationItem(item, listOf(item.id)))
@@ -1197,12 +1275,54 @@ internal fun groupConsecutiveCommands(timeline: List<TimelineItem>): List<Timeli
                         title = uiText(R.string.ui_081, "运行了多个命令"),
                         body = body,
                         status = status,
+                        turnId = item.turnId,
                     ),
                     sourceItemIds = commands.map(TimelineItem::id),
                 ),
             )
         }
         index = end
+    }
+}
+
+internal fun conversationPresentation(timeline: List<TimelineItem>): List<TimelinePresentationItem> {
+    val grouped = groupConsecutiveCommands(timeline)
+    var currentTurn = "legacy:0"
+    val turns = grouped.mapIndexed { index, row ->
+        if (row.item.kind == TimelineKind.USER) currentTurn = row.item.turnId?.let { "turn:$it" } ?: "legacy:$index"
+        row.item.turnId?.let { "turn:$it" } ?: currentTurn
+    }
+    val replies = mutableMapOf<String, Int>()
+    val changes = mutableMapOf<String, MutableList<FileChangeSummary>>()
+    grouped.forEachIndexed { index, row ->
+        if (row.item.kind == TimelineKind.AGENT && row.item.body.isNotBlank()) replies[turns[index]] = index
+        if (row.item.kind == TimelineKind.FILE_CHANGE && !row.item.status.isTimelineItemRunning() && row.item.status != "failed") {
+            row.item.fileChanges.forEach { change ->
+                changes.getOrPut(turns[index]) { mutableListOf() }.add(change)
+            }
+        }
+    }
+    val elapsedByTurn = grouped.indices.groupBy { turns[it] }.mapValues { (_, indices) -> indices.mapNotNull { grouped[it].item.elapsedMs }.maxOrNull() }
+    return grouped.mapIndexedNotNull { index, original ->
+        val row = original.copy(turnKey = turns[index],
+            turnElapsedMs = replies[turns[index]]?.let { grouped[it].item.elapsedMs }
+                ?: elapsedByTurn[turns[index]])
+        val reply = replies[turns[index]]?.let(grouped::get)
+        val complete = reply != null && !reply.item.status.isTimelineItemRunning()
+        when {
+            complete && row.item.kind == TimelineKind.FILE_CHANGE && row.item.fileChanges.isNotEmpty() &&
+                !row.item.status.isTimelineItemRunning() && row.item.status != "failed" -> null
+            index == replies[turns[index]] -> row.copy(
+                footerFiles = if (complete) changes[turns[index]].orEmpty().groupBy { it.path }.values.map { patches ->
+                    patches.last().copy(diff = patches.map { it.diff }.filter(String::isNotBlank).joinToString("\n"))
+                } else emptyList(),
+                isTurnReply = true,
+            )
+            else -> row
+        }
+    }.let { rows ->
+        val seen = mutableSetOf<String>()
+        rows.map { it.copy(startsActivity = it.item.kind != TimelineKind.USER && seen.add(it.turnKey)) }
     }
 }
 
@@ -1216,10 +1336,20 @@ private fun Conversation(
     onConversationPositioned: () -> Unit,
     modifier: Modifier,
     onLoadOlderHistory: () -> Unit,
+    onChangeProject: () -> Unit,
 ) {
     val conversationKey = state.selectedThreadId ?: "project:${state.selectedProjectPath.orEmpty()}"
     val scrollScope = rememberCoroutineScope()
-    val presentationTimeline = remember(state.timeline) { groupConsecutiveCommands(state.timeline) }
+    val presentationTimeline = remember(state.timeline) { conversationPresentation(state.timeline) }
+    val displayedReplies = remember(conversationKey) { mutableStateMapOf<String, String>() }
+    val displayedSnapshot = displayedReplies.toMap()
+    val turnReplies = remember(presentationTimeline) { presentationTimeline.filter { it.item.kind == TimelineKind.AGENT }.groupBy { it.turnKey }.mapValues { (_, rows) -> rows.joinToString("\n\n") { it.item.body } } }
+    val expandedActivity = remember(conversationKey) { mutableStateMapOf<String, Boolean>() }
+    val visibleTimeline = presentationTimeline.filter { row ->
+        row.item.kind == TimelineKind.USER || row.isTurnReply || row.startsActivity ||
+            (expandedActivity[row.turnKey] ?: (state.isTurnRunning && row.turnKey == presentationTimeline.lastOrNull()?.turnKey)) || row.turnElapsedMs == null
+    }
+    val dragged by listState.interactionSource.collectIsDraggedAsState()
     var pendingHistoryAnchor by remember(conversationKey) { mutableStateOf<HistoryScrollAnchor?>(null) }
     var programmaticScroll by remember(conversationKey) { mutableStateOf(false) }
     val historyHeaderVisible = state.hasOlderHistory ||
@@ -1230,7 +1360,8 @@ private fun Conversation(
         val firstTimelineItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { item ->
             item.key != HISTORY_CONTROL_KEY &&
                 item.key != WORKING_ITEM_KEY &&
-                item.key != BOTTOM_SENTINEL_KEY
+            item.key != BOTTOM_SENTINEL_KEY &&
+                item.key != "turn-elapsed"
         } ?: return null
         val itemId = firstTimelineItem.key as? String ?: return null
         val sourceItemId = presentationTimeline
@@ -1242,10 +1373,16 @@ private fun Conversation(
     }
 
     if (state.timeline.isEmpty()) {
+        if (state.connectionStatus == ConnectionStatus.CONNECTING) {
+            Box(modifier)
+            return
+        }
         val project = state.projects.firstOrNull { it.path == state.selectedProjectPath }
         Box(modifier, contentAlignment = Alignment.Center) {
             Column(
-                modifier = Modifier.widthIn(max = 560.dp).padding(28.dp),
+                modifier = Modifier.widthIn(max = 560.dp)
+                    .clickable(enabled = state.selectedThreadId == null && !state.isBusy, onClick = onChangeProject)
+                    .testTag("new-conversation-project").padding(28.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 if (state.isBusy) {
@@ -1265,10 +1402,13 @@ private fun Conversation(
                 )
                 Spacer(Modifier.height(5.dp))
                 Text(
-                    project?.path ?: state.connectionMessage,
+                    project?.path.orEmpty(),
                     style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+                if (state.selectedThreadId == null && !state.isBusy) {
+                    TextButton(onClick = onChangeProject) { Text(uiText(R.string.change_project, "Change project")) }
+                }
                 if (state.hasOlderHistory && !state.isBusy) {
                     Spacer(Modifier.height(10.dp))
                     TextButton(onClick = onLoadOlderHistory) {
@@ -1300,23 +1440,24 @@ private fun Conversation(
         val workingItems = if (state.isTurnRunning && presentationTimeline.lastOrNull()?.item?.kind != TimelineKind.AGENT) 1 else 0
         programmaticScroll = true
         try {
-            listState.scrollToAbsoluteBottom(leadingItems + presentationTimeline.size + workingItems)
+            listState.scrollToAbsoluteBottom(leadingItems + visibleTimeline.size + workingItems)
             onFollowLatestChange(true)
             onConversationPositioned()
         } finally {
             programmaticScroll = false
         }
     }
-    LaunchedEffect(listState, conversationKey, hasPositionedConversation) {
+    LaunchedEffect(listState, conversationKey, hasPositionedConversation, dragged) {
         if (!hasPositionedConversation) return@LaunchedEffect
+        if (dragged) { onFollowLatestChange(false); return@LaunchedEffect }
         snapshotFlow {
             listState.isScrollInProgress to listState.canScrollForward
         }.distinctUntilChanged().collect { (isScrolling, canScrollForward) ->
-            if (!programmaticScroll && isScrolling) onFollowLatestChange(!canScrollForward)
+            if (!isScrolling && !canScrollForward) onFollowLatestChange(true)
         }
     }
-    LaunchedEffect(listState, conversationKey, hasPositionedConversation, followLatest) {
-        if (!hasPositionedConversation || !followLatest) return@LaunchedEffect
+    LaunchedEffect(listState, conversationKey, hasPositionedConversation, followLatest, dragged, pendingHistoryAnchor, state.isOlderHistoryLoading) {
+        if (!hasPositionedConversation || !followLatest || dragged || pendingHistoryAnchor != null || state.isOlderHistoryLoading) return@LaunchedEffect
         snapshotFlow {
             Triple(
                 listState.canScrollForward,
@@ -1334,7 +1475,7 @@ private fun Conversation(
             }
             programmaticScroll = true
             try {
-                listState.scrollToAbsoluteBottom(totalItemsCount - 1)
+                listState.scrollToItem(totalItemsCount - 1)
             } finally {
                 programmaticScroll = false
             }
@@ -1382,7 +1523,7 @@ private fun Conversation(
     ) {
         val anchor = pendingHistoryAnchor ?: return@LaunchedEffect
         if (state.isOlderHistoryLoading) return@LaunchedEffect
-        val timelineIndex = presentationTimeline.indexOfFirst { anchor.itemId in it.sourceItemIds }
+        val timelineIndex = visibleTimeline.indexOfFirst { anchor.itemId in it.sourceItemIds }
         if (timelineIndex >= 0) {
             val leadingItems = if (historyHeaderVisible) 1 else 0
             programmaticScroll = true
@@ -1396,34 +1537,11 @@ private fun Conversation(
         }
         pendingHistoryAnchor = null
     }
-    LaunchedEffect(
-        state.selectedThreadId,
-        presentationTimeline.size,
-        presentationTimeline.lastOrNull()?.item?.body?.length,
-        state.isTurnRunning,
-        historyHeaderVisible,
-        pendingHistoryAnchor,
-        followLatest,
-        hasPositionedConversation,
-    ) {
-        if (!hasPositionedConversation || presentationTimeline.isEmpty() || !followLatest ||
-            state.isOlderHistoryLoading || pendingHistoryAnchor != null
-        ) {
-            return@LaunchedEffect
-        }
-        val leadingItems = if (historyHeaderVisible) 1 else 0
-        val workingItems = if (state.isTurnRunning && presentationTimeline.lastOrNull()?.item?.kind != TimelineKind.AGENT) 1 else 0
-        programmaticScroll = true
-        try {
-            listState.scrollToAbsoluteBottom(leadingItems + presentationTimeline.size + workingItems)
-        } finally {
-            programmaticScroll = false
-        }
-    }
-
     Box(modifier) {
         LazyColumn(
-            modifier = Modifier.fillMaxSize().testTag("conversation-list"),
+            modifier = Modifier.fillMaxSize().testTag("conversation-list").pointerInput(conversationKey) {
+                awaitEachGesture { awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial); onFollowLatestChange(false) }
+            },
             state = listState,
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 22.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -1458,24 +1576,36 @@ private fun Conversation(
                 }
             }
         }
-            items(presentationTimeline, key = { it.item.id }) { presentation ->
+            items(visibleTimeline, key = { it.item.id }) { presentation ->
+                val running = state.isTurnRunning && presentation.turnKey == presentationTimeline.lastOrNull()?.turnKey
+                val expanded = expandedActivity[presentation.turnKey] ?: running
+                Column {
+                if (presentation.startsActivity && (presentation.turnElapsedMs != null || running)) {
+                    TurnDuration(presentation.turnElapsedMs, if (running) state.turnStartedAt else 0,
+                        Modifier.testTag("reply-duration-${presentationTimeline.lastOrNull { it.turnKey == presentation.turnKey && it.isTurnReply }?.item?.id ?: presentation.item.id}"), expanded,
+                        canExpand = presentationTimeline.any { it.turnKey == presentation.turnKey && it.item.kind != TimelineKind.USER && !it.isTurnReply }) {
+                        expandedActivity[presentation.turnKey] = !expanded
+                    }
+                }
+                if (presentation.item.kind == TimelineKind.USER || presentation.isTurnReply || expanded || presentation.turnElapsedMs == null && !running) {
                 Box(
                     Modifier.fillMaxWidth().testTag("timeline-item-${presentation.item.id}"),
                     contentAlignment = Alignment.TopCenter,
                 ) {
-                    TimelineRow(presentation.item, Modifier.fillMaxWidth().widthIn(max = 820.dp))
+                    TimelineRow(presentation.item, Modifier.fillMaxWidth().widthIn(max = 820.dp),
+                        presentation.footerFiles, presentation.isTurnReply, running,
+                        turnReplies[presentation.turnKey].orEmpty(), displayedSnapshot[presentation.item.id],
+                        { source -> displayedReplies[presentation.item.id] = source })
+                }
+                }
+                if (presentation.item.kind == TimelineKind.USER && presentation.item.id == presentationTimeline.lastOrNull()?.item?.id && state.isTurnRunning) {
+                    TurnDuration(null, state.turnStartedAt, Modifier.testTag("turn-elapsed"), true, canExpand = false) { }
+                }
                 }
             }
-            if (state.isTurnRunning && presentationTimeline.lastOrNull()?.item?.kind != TimelineKind.AGENT) {
+            if (state.isTurnRunning) {
                 item(key = WORKING_ITEM_KEY) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().widthIn(max = 820.dp).padding(vertical = 4.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        CircularProgressIndicator(Modifier.size(15.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(9.dp))
-                        Text(uiText(R.string.ui_087, "Working"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
+                    LoadingDots(Modifier.padding(vertical = 4.dp))
                 }
             }
             item(key = BOTTOM_SENTINEL_KEY) {
@@ -1515,9 +1645,10 @@ private const val WORKING_ITEM_KEY = "working"
 private const val BOTTOM_SENTINEL_KEY = "bottom-sentinel"
 private const val HISTORY_PREFETCH_INDEX = 2
 
-private suspend fun LazyListState.scrollToAbsoluteBottom(lastIndex: Int, animate: Boolean = false) {
+internal suspend fun LazyListState.scrollToAbsoluteBottom(lastIndex: Int, animate: Boolean = false) {
     if (lastIndex < 0) return
-    if (animate) animateScrollToItem(lastIndex) else scrollToItem(lastIndex)
+    val target = lastIndex.coerceAtMost((layoutInfo.totalItemsCount - 1).coerceAtLeast(0))
+    if (animate) animateScrollToItem(target) else scrollToItem(target)
     var attempts = 0
     var settledFrames = 0
     while (attempts++ < MAX_BOTTOM_SCROLL_STEPS) {
@@ -1530,17 +1661,52 @@ private suspend fun LazyListState.scrollToAbsoluteBottom(lastIndex: Int, animate
         settledFrames = 0
         val layout = layoutInfo
         val viewportHeight = (layout.viewportEndOffset - layout.viewportStartOffset).coerceAtLeast(1)
-        scrollBy(viewportHeight.toFloat())
+        if (animate) {
+            val last = layout.visibleItemsInfo.lastOrNull()
+            val distance = last?.let { it.offset + it.size + layout.afterContentPadding - layout.viewportEndOffset }
+                ?.coerceIn(1, viewportHeight) ?: viewportHeight
+            animateScrollBy(distance.toFloat(), androidx.compose.animation.core.tween(90))
+        } else scrollBy(viewportHeight.toFloat())
     }
 }
 
 private const val MAX_BOTTOM_SCROLL_STEPS = 1_000
 private const val BOTTOM_LAYOUT_SETTLE_FRAMES = 8
 
+internal fun formatTurnElapsed(milliseconds: Long): String {
+    val seconds = milliseconds.coerceAtLeast(0) / 1000
+    return when {
+        seconds >= 3600 -> uiText(R.string.elapsed_hours, "Took %1\$d h %2\$d min %3\$d s", seconds / 3600, seconds / 60 % 60, seconds % 60)
+        seconds >= 60 -> uiText(R.string.elapsed_minutes, "Took %1\$d min %2\$d s", seconds / 60, seconds % 60)
+        else -> uiText(R.string.elapsed_seconds, "Took %1\$d s", seconds)
+    }
+}
+
 @Composable
-private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
+private fun TurnDuration(completedMs: Long?, startedAt: Long, modifier: Modifier, expanded: Boolean, canExpand: Boolean = true, onClick: () -> Unit) {
+    var elapsed by remember(startedAt) { mutableStateOf(0L) }
+    LaunchedEffect(startedAt) {
+        if (startedAt > 0) while (true) {
+            elapsed = (android.os.SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0)
+            kotlinx.coroutines.delay(1_000)
+        }
+    }
+    Column(Modifier.fillMaxWidth()) {
+        Row(modifier.fillMaxWidth().clickable(enabled = canExpand, onClick = onClick).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(formatTurnElapsed(if (startedAt > 0) elapsed else completedMs ?: 0),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (canExpand) Icon(if (expanded) Icons.Outlined.KeyboardArrowDown else Icons.Outlined.ChevronRight, null, Modifier.size(18.dp))
+        }
+        HorizontalDivider(Modifier.padding(bottom = 12.dp))
+    }
+}
+
+@Composable
+private fun TimelineRow(item: TimelineItem, modifier: Modifier, footerFiles: List<FileChangeSummary> = emptyList(), isTurnReply: Boolean = false, turnRunning: Boolean = false, turnReply: String = item.body, displayedBody: String? = null, onDisplayed: (String) -> Unit = {}) {
     when (item.kind) {
         TimelineKind.USER -> Row(modifier, horizontalArrangement = Arrangement.End) {
+            val context = LocalContext.current
+            Column(horizontalAlignment = Alignment.End) {
             Surface(
                 modifier = Modifier.widthIn(max = 620.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant,
@@ -1574,9 +1740,38 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
                     }
                 }
             }
+            if (item.body.isNotBlank()) IconButton(onClick = {
+                (context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager)
+                    .setPrimaryClip(android.content.ClipData.newPlainText("prompt", item.body))
+            }, modifier = Modifier.size(40.dp).testTag("prompt-copy-${item.id}")) {
+                Icon(Icons.Outlined.ContentCopy, uiText(R.string.copy_prompt, "Copy prompt"), Modifier.size(17.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            }
         }
         TimelineKind.AGENT -> Column(modifier) {
-            MarkdownBody(item.body, Modifier.testTag("timeline-agent-${item.id}"))
+            RichBody(item.body, Modifier.testTag("timeline-agent-${item.id}"), streaming = item.status.isTimelineItemRunning(), onDisplayed = onDisplayed)
+            if (footerFiles.isNotEmpty()) {
+                Spacer(Modifier.height(12.dp))
+                FileChangesTool(TimelineItem("reply-${item.id}", TimelineKind.FILE_CHANGE, status = "completed",
+                    fileChanges = footerFiles), Modifier.fillMaxWidth(), summary = true)
+            }
+            if (isTurnReply && !turnRunning && item.body.isNotBlank() && !item.status.isTimelineItemRunning() && displayedBody == item.body) {
+                val context = LocalContext.current
+                Row(Modifier.offset(x = (-8).dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                        clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Codex", turnReply))
+                    }, modifier = Modifier.size(36.dp).testTag("reply-copy-${item.id}")) {
+                        Icon(Icons.Outlined.ContentCopy, uiText(R.string.copy_reply, "Copy reply"), Modifier.size(17.dp),
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (isTurnReply) item.completedAt?.let { completedAt ->
+                        Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(completedAt)),
+                            Modifier.testTag("reply-time-${item.id}"), style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
         }
         TimelineKind.REASONING -> ExpandableTool(
             modifier,
@@ -1601,10 +1796,12 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
             expansionKey = item.id, mono = true, autoCollapseOnComplete = true,
         )
         TimelineKind.FILE_CHANGE -> FileChangesTool(item, modifier)
-        TimelineKind.TOOL -> ExpandableTool(
+        TimelineKind.TOOL -> Column(modifier) { ExpandableTool(
             modifier, Icons.Outlined.Build, item.title.ifBlank { uiText(R.string.ui_092, "Tool") }, item.body, item.status,
             expansionKey = item.id, mono = true, autoCollapseOnComplete = true,
         )
+            item.media.forEach { path -> RichBody("![Image](<$path>)") }
+        }
         TimelineKind.REVIEW -> ExpandableTool(
             modifier, Icons.Outlined.Code, item.title.ifBlank { uiText(R.string.ui_093, "Code review") }, item.body, item.status,
             expansionKey = item.id, autoCollapseOnComplete = true,
@@ -1635,7 +1832,7 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
 }
 
 @Composable
-private fun FileChangesTool(item: TimelineItem, modifier: Modifier) {
+private fun FileChangesTool(item: TimelineItem, modifier: Modifier, summary: Boolean = false) {
     var expanded by remember(item.id) { mutableStateOf(item.status.isTimelineItemRunning()) }
     LaunchedEffect(item.id, item.status) {
         expanded = item.status.isTimelineItemRunning()
@@ -1646,7 +1843,7 @@ private fun FileChangesTool(item: TimelineItem, modifier: Modifier) {
     }
     val title = when (item.fileChanges.size) {
         0 -> item.title.ifBlank { uiText(R.string.ui_096, "File changes") }
-        1 -> item.fileChanges.first().path
+        1 -> if (summary) uiText(R.string.file_count, "已编辑 %1\$d 个文件", 1) else item.fileChanges.first().path
         else -> uiText(R.string.file_count, "已编辑 %1\$d 个文件", item.fileChanges.size)
     }
     Surface(
@@ -1803,7 +2000,7 @@ private fun ExpandableTool(
     Surface(
         modifier = modifier.animateContentSize().testTag("timeline-tool-$expansionKey"),
         shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant,
+        color = Color.Transparent,
     ) {
         Column {
             Row(
@@ -1826,13 +2023,27 @@ private fun ExpandableTool(
                     modifier = Modifier.size(18.dp),
                 )
             }
-            if (expanded && body.isNotBlank()) {
+            if (expanded) {
                 HorizontalDivider()
                 SelectionContainer {
                     Text(
-                        body,
+                        body.ifBlank { uiText(R.string.no_reasoning_summary, "The server did not provide a summary for this step.") },
                         modifier = Modifier.fillMaxWidth().padding(12.dp)
-                            .testTag("timeline-tool-body-$expansionKey"),
+                            .testTag("timeline-tool-body-$expansionKey")
+                            .semantics { onClick(uiText(R.string.ui_104, "Collapse")) { expanded = false; true } }
+                            .pointerInput(expansionKey) {
+                                // Observe taps without consuming the selection or scrolling gestures.
+                                awaitEachGesture {
+                                    val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Final)
+                                    var tap = true
+                                    var event: androidx.compose.ui.input.pointer.PointerEvent
+                                    do {
+                                        event = awaitPointerEvent(PointerEventPass.Final)
+                                        if (event.changes.any { it.isConsumed || (it.position - down.position).getDistance() > viewConfiguration.touchSlop }) tap = false
+                                    } while (event.changes.any { it.pressed })
+                                    if (tap && event.changes.first().uptimeMillis - down.uptimeMillis < viewConfiguration.longPressTimeoutMillis) expanded = false
+                                }
+                            },
                         style = if (mono) MonoText else MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -1848,7 +2059,7 @@ internal fun String.isTimelineItemRunning(): Boolean =
         equals("started", ignoreCase = true)
 
 @Composable
-internal fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
+internal fun MarkdownBody(text: String, modifier: Modifier = Modifier, streaming: Boolean = false, plainText: Boolean = false, onDisplayed: (String) -> Unit = {}) {
     val context = LocalContext.current
     val density = LocalDensity.current
     val latexTextSize = with(density) { MaterialTheme.typography.bodyLarge.fontSize.toPx() }
@@ -1858,13 +2069,42 @@ internal fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
             .usePlugin(JLatexMathPlugin.create(latexTextSize) { builder -> builder.inlinesEnabled(true) })
             .usePlugin(StrikethroughPlugin.create())
             .usePlugin(TablePlugin.create(context))
+            .usePlugin(object : io.noties.markwon.AbstractMarkwonPlugin() {
+                override fun configureConfiguration(builder: io.noties.markwon.MarkwonConfiguration.Builder) {
+                    builder.linkResolver { view, link ->
+                        val uri = Uri.parse(link)
+                        if (uri.scheme == "https" || uri.scheme == "http") runCatching {
+                            view.context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, uri))
+                        }
+                    }
+                }
+            })
             .build()
     }
     val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
-    val rendered = remember(text) { normalizeLatexMarkdown(text) }
+    val rendered = remember(text, plainText) { if (plainText) text else normalizeLatexMarkdown(text) }
+    val latestRendered by rememberUpdatedState(rendered)
+    val latestText by rememberUpdatedState(text)
+    val notifyDisplayed by rememberUpdatedState(onDisplayed)
+    var paintedSource by remember(markwon) { mutableStateOf<String?>(null) }
+    LaunchedEffect(rendered, paintedSource, onDisplayed) {
+        if (paintedSource == rendered) notifyDisplayed(text)
+    }
+    var parsed by remember(markwon) { mutableStateOf<Pair<String, android.text.Spanned>?>(null) }
+    // ponytail: static replies parse once before measurement; live deltas still parse on a worker.
+    // Huge static documents can block a frame; cache their worker-parsed result upstream if needed.
+    val staticContent = if (!streaming) remember(markwon, rendered, plainText) {
+        if (plainText) android.text.SpannableStringBuilder(rendered) else markwon.toMarkdown(rendered)
+    } else null
+    LaunchedEffect(markwon, streaming, plainText) {
+        if (!streaming) return@LaunchedEffect
+        snapshotFlow { latestRendered }.conflate().collect { markdown ->
+            parsed = markdown to kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { markwon.toMarkdown(markdown) }
+        }
+    }
     AndroidView(
         factory = { viewContext ->
-            TextView(viewContext).apply {
+            RevealTextView(viewContext).apply {
                 setTextIsSelectable(true)
                 movementMethod = LinkMovementMethod.getInstance()
                 includeFontPadding = false
@@ -1873,7 +2113,10 @@ internal fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
         },
         update = { textView ->
             textView.setTextColor(textColor)
-            markwon.setMarkdown(textView, rendered)
+            textView.typeface = if (plainText) android.graphics.Typeface.MONOSPACE else android.graphics.Typeface.DEFAULT
+            (staticContent?.let { rendered to it } ?: parsed?.takeIf { it.first == latestRendered })?.let { (source, content) -> textView.setMarkdown(markwon, content, streaming) {
+                if (source == latestRendered) { paintedSource = source; notifyDisplayed(latestText) }
+            } }
         },
         modifier = modifier.fillMaxWidth(),
     )
@@ -1985,13 +2228,24 @@ private fun Composer(
     onSetPermissionMode: (PermissionMode) -> Unit,
     onLoadRemoteDirectory: (String) -> Unit,
     onClearRemoteDirectory: () -> Unit,
+    sendEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val draftContext = LocalContext.current
     val draftStore = remember(draftContext) { com.codex.remote.data.store.LocalStore(draftContext) }
     val draftHost = state.activeConnection?.id.orEmpty()
     val draftKey = state.selectedThreadId ?: "project:${state.selectedProjectPath.orEmpty()}"
-    var text by remember(draftHost, draftKey) { mutableStateOf(TextFieldValue(runCatching { draftStore.draft(draftHost, draftKey) }.getOrDefault(""))) }
+    val pendingDraft = remember(draftHost) { mutableStateOf(TextFieldValue()) }
+    var text by remember(draftHost, draftKey) {
+        val stored = runCatching { draftStore.draft(draftHost, draftKey) }.getOrDefault("")
+        val carried = pendingDraft.value.takeIf { draftKey != "project:" && it.text.isNotBlank() }
+        if (carried != null) pendingDraft.value = TextFieldValue()
+        val initial = if (carried != null && stored.isNotBlank() && stored != carried.text) {
+            TextFieldValue("$stored\n${carried.text}")
+        } else carried ?: TextFieldValue(stored)
+        mutableStateOf(initial)
+    }
+    SideEffect { if (draftKey == "project:") pendingDraft.value = text }
     val latestDraft by rememberUpdatedState(text.text)
     LaunchedEffect(state.failedSend?.itemId) {
         state.failedSend?.takeIf { failed -> state.timeline.any { it.id == failed.itemId } }?.let { failed ->
@@ -2053,7 +2307,7 @@ private fun Composer(
                 )
             }
         ).distinctBy { it.name }
-    val slashCommands = allSlashCommands.filter { command ->
+    val slashCommands = if (!sendEnabled) emptyList() else allSlashCommands.filter { command ->
         trigger?.kind == ComposerTriggerKind.SLASH_COMMAND &&
             (trigger.query.isBlank() || command.name.contains(trigger.query, ignoreCase = true) ||
                 command.description.contains(trigger.query, ignoreCase = true))
@@ -2256,7 +2510,7 @@ private fun Composer(
             ) {
                 Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
                     state.failedSend?.takeIf { failed -> state.timeline.any { it.id == failed.itemId && it.status == "sendFailed" } }?.let { failed ->
-                        TextButton(onClick = { onSend(failed.text, failed.mentions, failed.attachments, failed.asGoal) }, enabled = !state.isTurnRunning) {
+                        TextButton(onClick = { onSend(failed.text, failed.mentions, failed.attachments, failed.asGoal) }, enabled = sendEnabled && !state.isTurnRunning) {
                             Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text(uiText(R.string.retry_send, "Retry message"))
@@ -2373,7 +2627,7 @@ private fun Composer(
                                         token = plugin.composerToken(),
                                     )
                                 },
-                                canBrowseRemoteFiles = cwd.isNotBlank(),
+                                canBrowseRemoteFiles = sendEnabled && cwd.isNotBlank(),
                                 canAttachImage = supportsImages && attachments.size < MAX_COMPOSER_IMAGES,
                                 planModeAvailable = planModeAvailable,
                                 onOpen = { addMenuOpen = true },
@@ -2459,10 +2713,9 @@ private fun Composer(
                                 ),
                                 maxLabelWidth = 144.dp,
                                 enabled = state.models.isNotEmpty(),
-                                onClick = {
-                                    keyboardController?.hide()
-                                    modelSettingsMenu = true
-                                },
+                                leadingIcon = if (selectedServiceTier?.id.equals("fast", true)) Icons.Outlined.Bolt else null,
+                                showChevron = false,
+                                onClick = { modelSettingsMenu = true },
                             )
                             ModelSettingsDropdown(
                                 state = state,
@@ -2512,7 +2765,7 @@ private fun Composer(
                                         }
                                     }
                                 },
-                                enabled = if (goalModeActive || inlineGoalObjective != null) {
+                                enabled = sendEnabled && if (goalModeActive || inlineGoalObjective != null) {
                                     text.text.isNotBlank() && !state.isTurnRunning && !state.isGoalLoading
                                 } else {
                                     (text.text.isNotBlank() || attachments.isNotEmpty() || state.isTurnRunning) &&
@@ -2521,7 +2774,7 @@ private fun Composer(
                                 modifier = Modifier.testTag("composer-send"),
                             ) {
                                 Icon(
-                                    if (state.isTurnRunning && text.text.isBlank() && attachments.isEmpty()) Icons.Outlined.Stop else Icons.Outlined.ArrowUpward,
+                                    if (state.isTurnRunning && text.text.isBlank() && attachments.isEmpty()) Icons.Filled.Stop else Icons.Outlined.ArrowUpward,
                                     contentDescription = if (state.isTurnRunning && text.text.isBlank()) uiText(R.string.ui_111, "Stop") else if (state.isTurnRunning) uiText(R.string.ui_112, "追加到当前任务") else uiText(R.string.ui_113, "发送"),
                                     tint = MaterialTheme.colorScheme.onPrimary,
                                 )
@@ -2679,23 +2932,43 @@ private fun RemotePathPickerDialog(
     onNavigate: (String) -> Unit,
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit,
+    directoriesOnly: Boolean = false,
+    onCreateDirectory: (String, String) -> Unit = { _, _ -> },
 ) {
     val currentPath = state.remoteDirectoryPath ?: projectRoot
+    var creatingFolder by remember(currentPath) { mutableStateOf(false) }
+    var folderName by remember(currentPath) { mutableStateOf("") }
+    var pathInput by remember(currentPath) { mutableStateOf(currentPath) }
+    val validFolderName = remember(currentPath, folderName) {
+        runCatching { com.codex.remote.data.rpc.remoteDirectoryChildPath(currentPath, folderName) }.isSuccess
+    }
     val parentPath = remoteParentPath(currentPath)?.takeIf { parent ->
         remotePathIsWithinRoot(projectRoot, parent)
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(uiText(R.string.ui_115, "文件和文件夹")) },
+        title = { Text(if (directoriesOnly) uiText(R.string.choose_project_folder, "Choose a project folder") else uiText(R.string.ui_115, "文件和文件夹")) },
         text = {
             Column {
-                Text(
-                    currentPath,
-                    style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (directoriesOnly) {
+                    OutlinedTextField(pathInput, { pathInput = it }, singleLine = true,
+                        modifier = Modifier.testTag("remote-project-path"), label = { Text(uiText(R.string.project_path, "Folder path")) })
+                    Row {
+                        TextButton(onClick = { onNavigate(pathInput.trim()) }, enabled = pathInput.isNotBlank() && !state.isRemoteDirectoryLoading) { Text(uiText(R.string.open_folder, "Open folder")) }
+                        TextButton(onClick = { creatingFolder = !creatingFolder }, enabled = pathInput.trim() == currentPath && !state.isRemoteDirectoryLoading && state.remoteDirectoryError == null,
+                            modifier = Modifier.testTag("new-remote-folder")) { Text(uiText(R.string.new_folder, "New folder")) }
+                    }
+                    if (creatingFolder) {
+                        OutlinedTextField(folderName, { folderName = it }, singleLine = true, enabled = !state.isRemoteDirectoryLoading,
+                            modifier = Modifier.fillMaxWidth().testTag("remote-folder-name"),
+                            label = { Text(uiText(R.string.folder_name, "Folder name")) },
+                            isError = folderName.isNotEmpty() && !validFolderName)
+                        TextButton(onClick = { onCreateDirectory(currentPath, folderName) },
+                            enabled = pathInput.trim() == currentPath && validFolderName && !state.isRemoteDirectoryLoading && state.remoteDirectoryError == null,
+                            modifier = Modifier.testTag("create-remote-folder")) { Text(uiText(R.string.create_folder, "Create folder")) }
+                    }
+                } else Text(currentPath, style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(8.dp))
                 when {
                     state.isRemoteDirectoryLoading -> Box(
@@ -2718,7 +2991,7 @@ private fun RemotePathPickerDialog(
                                 RemotePathRow("..", true) { onNavigate(parentPath) }
                             }
                         }
-                        items(state.remoteDirectoryEntries, key = { "${it.name}:${it.isDirectory}" }) { entry ->
+                        items(state.remoteDirectoryEntries.filter { !directoriesOnly || it.isDirectory }, key = { "${it.name}:${it.isDirectory}" }) { entry ->
                             val childPath = appendRemotePath(currentPath, entry.name)
                             RemotePathRow(entry.name, entry.isDirectory) {
                                 if (entry.isDirectory) onNavigate(childPath) else onSelect(childPath)
@@ -2732,7 +3005,8 @@ private fun RemotePathPickerDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = { onSelect(currentPath) }, enabled = !state.isRemoteDirectoryLoading) {
+            TextButton(onClick = { onSelect(currentPath) }, enabled = (!directoriesOnly || pathInput.trim() == currentPath) && !state.isRemoteDirectoryLoading && state.remoteDirectoryError == null,
+                modifier = Modifier.testTag("select-remote-folder")) {
                 Text(uiText(R.string.ui_126, "选择此文件夹"))
             }
         },
@@ -3228,7 +3502,7 @@ private fun DeleteArchivedThreadDialog(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RemoteStatusDialog(state: AppUiState, onDismiss: () -> Unit) {
+internal fun RemoteStatusDialog(state: AppUiState, onDismiss: () -> Unit) {
     val usage = state.threadTokenUsage
     val contextPercent = usage?.modelContextWindow?.takeIf { it > 0 }?.let { usage.totalTokens * 100.0 / it }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
@@ -3481,21 +3755,22 @@ private fun ModelSettingsDropdown(
     onSetReasoningEffort: (String) -> Unit,
     onSetServiceTier: (String?) -> Unit,
 ) {
-    if (expanded) ModelConfigurationSheet(models = state.models, selectedModel = state.selectedModel,
+    ModelConfigurationMenu(expanded = expanded, models = state.models, selectedModel = state.selectedModel,
         effort = state.selectedReasoningEffort, serviceTier = state.selectedServiceTier,
         onModel = onSetModel, onEffort = onSetReasoningEffort, onTier = onSetServiceTier, onDismiss = onDismiss)
 }
 
 
+@Suppress("UNUSED_PARAMETER")
 internal fun modelSettingsSummary(
     modelId: String?,
     effort: String?,
     serviceTier: String?,
 ): String = listOfNotNull(
-    modelId?.removePrefix("gpt-")?.removePrefix("GPT-") ?: uiText(R.string.ui_191, "模型"),
+    modelId?.removePrefix("gpt-")?.removePrefix("GPT-")?.split('-')
+        ?.joinToString(" ") { it.replaceFirstChar(Char::uppercase) } ?: uiText(R.string.ui_191, "Model"),
     effort?.displayEffort(),
-    serviceTier?.takeUnless { it.equals("standard", ignoreCase = true) },
-).joinToString(" · ")
+).joinToString(" ")
 
 @Composable
 private fun CompactComposerMenuButton(
@@ -3515,13 +3790,13 @@ private fun CompactComposerMenuButton(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         leadingIcon?.let {
-            Icon(it, contentDescription = null, modifier = Modifier.size(15.dp))
+            Icon(it, contentDescription = if (it == Icons.Outlined.Bolt) uiText(R.string.ui_195, "Fast") else null, modifier = Modifier.size(15.dp))
             Spacer(Modifier.width(5.dp))
         }
         Text(
             label,
             modifier = Modifier.widthIn(max = maxLabelWidth),
-            style = MaterialTheme.typography.labelMedium,
+            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
             color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
@@ -3886,19 +4161,36 @@ private fun RenameThreadDialog(
 }
 
 @Composable
-private fun ArchiveThreadDialog(
-    thread: RemoteThread,
+internal fun ArchiveConfirmationDialog(
+    title: String,
+    remote: Boolean = false,
     onDismiss: () -> Unit,
     onArchive: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val preferences = remember(context) { context.getSharedPreferences("archive-confirmation", android.content.Context.MODE_PRIVATE) }
+    if (remember { preferences.getBoolean("skip", false) }) {
+        LaunchedEffect(Unit) { onArchive() }
+        return
+    }
+    var neverAsk by remember(title) { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = { Icon(Icons.Outlined.Archive, contentDescription = null) },
-        title = { Text(uiText(R.string.ui_234, "Archive task?")) },
+        title = { Text(uiText(if (remote) R.string.ui_234 else R.string.archive_conversation_title, "Archive conversation?")) },
         text = {
-            Text(uiText(R.string.archive_remote_task, "%1\$s will be archived. Remote history is kept.", thread.title))
+            Column {
+                Text(uiText(if (remote) R.string.archive_remote_task else R.string.archive_local_chat, "%1\$s will be archived. History is kept.", title))
+                Row(Modifier.fillMaxWidth().toggleable(value = neverAsk, role = androidx.compose.ui.semantics.Role.Checkbox, onValueChange = { neverAsk = it }), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = neverAsk, onCheckedChange = null)
+                    Text(uiText(R.string.dont_ask_archive, "Don't ask again"))
+                }
+            }
         },
-        confirmButton = { Button(onClick = onArchive) { Text(uiText(R.string.ui_072, "Archive")) } },
+        confirmButton = { Button(onClick = {
+            if (neverAsk) preferences.edit().putBoolean("skip", true).apply()
+            onArchive()
+        }, modifier = Modifier.testTag("confirm-archive")) { Text(uiText(R.string.ui_072, "Archive")) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_037, "Cancel")) } },
     )
 }
@@ -3940,7 +4232,7 @@ private fun RemoteDeviceLoginDialog(
 }
 
 @Composable
-private fun HostKeyConfirmationDialog(
+internal fun HostKeyConfirmationDialog(
     host: String,
     fingerprint: String,
     onTrust: () -> Unit,

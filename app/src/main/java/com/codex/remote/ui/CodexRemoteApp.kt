@@ -14,7 +14,7 @@ import com.codex.remote.ui.screens.WorkspaceScreen
 
 @Composable
 fun RemoteWorkspace(viewModel: AppViewModel, onOpenHosts: () -> Unit,
-    navigation: @Composable () -> Unit = {}, hostSelector: @Composable () -> Unit = {}) {
+    navigation: @Composable () -> Unit = {}, hostSelector: @Composable () -> Unit = {}, sidebarContent: (@Composable (Boolean, () -> Unit) -> Unit)? = null) {
     val state by viewModel.state.collectAsState()
     val showConnections = state.showConnections || state.activeConnection == null
 
@@ -35,9 +35,12 @@ fun RemoteWorkspace(viewModel: AppViewModel, onOpenHosts: () -> Unit,
             onDismissNotice = viewModel::clearNotice,
         )
     } else {
+        androidx.compose.runtime.CompositionLocalProvider(com.codex.remote.ui.screens.LocalArtifactReader provides { path -> viewModel.readArtifact(path) }) {
         WorkspaceScreen(
             state = state,
+            startOnTasksPage = true,
             navigation = navigation,
+            sidebarContent = sidebarContent,
             hostSelector = hostSelector,
             onOpenConnections = onOpenHosts,
             onNewThread = viewModel::newThread,
@@ -72,6 +75,7 @@ fun RemoteWorkspace(viewModel: AppViewModel, onOpenHosts: () -> Unit,
             onSetPermissionProfile = viewModel::setPermissionProfile,
             onSetPermissionMode = viewModel::setPermissionMode,
             onLoadRemoteDirectory = viewModel::loadRemoteDirectory,
+            onCreateRemoteDirectory = viewModel::createRemoteDirectory,
             onClearRemoteDirectory = viewModel::clearRemoteDirectory,
             onStartLogin = viewModel::startRemoteLogin,
             onCancelLogin = viewModel::cancelRemoteLogin,
@@ -80,5 +84,6 @@ fun RemoteWorkspace(viewModel: AppViewModel, onOpenHosts: () -> Unit,
             onRejectHostKey = viewModel::rejectPendingHostKey,
             onDismissNotice = viewModel::clearNotice,
         )
+        }
     }
 }

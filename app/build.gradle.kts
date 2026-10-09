@@ -26,11 +26,12 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.codex.remote"
+        // Keep the installed Codeb identity so the first public release preserves existing data.
+        applicationId = "com.codex.remote.dev"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 8
+        versionName = "0.2.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -49,8 +50,8 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".dev"
-            versionNameSuffix = "-dev"
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
         }
         release {
             isMinifyEnabled = true

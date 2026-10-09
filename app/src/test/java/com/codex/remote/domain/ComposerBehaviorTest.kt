@@ -51,8 +51,9 @@ class ComposerBehaviorTest {
     }
 
     @Test
-    fun combinedModelSummaryOnlyShowsFastWhenEnabled() {
-        assertEquals("5.6-sol · Ultra", modelSettingsSummary("gpt-5.6-sol", "ultra", null))
-        assertEquals("5.6-sol · Ultra · Fast", modelSettingsSummary("gpt-5.6-sol", "ultra", "Fast"))
+    fun combinedModelSummaryKeepsSpeedOutOfTheCompactLabel() {
+        assertEquals("5.6 Sol Ultra", modelSettingsSummary("gpt-5.6-sol", "ultra", null))
+        assertEquals("5.6 Sol Ultra", modelSettingsSummary("gpt-5.6-sol", "ultra", "Fast"))
+        assertEquals("6.1 Sol", modelSettingsSummary("gpt-6.1-sol", null, null))
     }
 }

@@ -8,6 +8,25 @@ import org.junit.Test
 class OpenAiClientTest {
     private fun provider(protocol: ApiProtocol) = ApiProvider(name = "test", baseUrl = "https://example.com/v1", encryptedKey = "", protocol = protocol, selectedModel = "custom-model", effort = "high")
 
+    @Test fun modelProbesUseTheExactIdAndBoundedNonStreamingRequests() {
+        ApiProtocol.entries.forEach { protocol ->
+            val body = OpenAiClient.probeBody(provider(protocol))
+            assertEquals("custom-model", body["model"]!!.jsonPrimitive.content)
+            assertFalse(body["stream"]!!.jsonPrimitive.boolean)
+            assertEquals(64, body[if (protocol == ApiProtocol.RESPONSES) "max_output_tokens" else "max_completion_tokens"]!!.jsonPrimitive.int)
+            assertFalse(body.containsKey("reasoning"))
+            assertFalse(body.containsKey("reasoning_effort"))
+        }
+    }
+
+    @Test fun modelProbeAcceptsNullErrorButDoesNotInventATextReply() {
+        fun result(source: String) = OpenAiClient.probeResult(Json.parseToJsonElement(source).jsonObject).outcome
+        assertEquals("passed", result("""{"error":null,"status":"completed","output":[{"content":[{"type":"output_text","text":"OK"}]}]}"""))
+        assertEquals("passed", result("""{"choices":[{"message":{"content":"OK"}}]}"""))
+        assertEquals("inconclusive", result("""{"error":null,"status":"incomplete","output":[]}"""))
+        assertThrows(IllegalStateException::class.java) { result("""{"error":{"message":"secret must not be displayed"}}""") }
+    }
+
     @Test fun requestProtocolsKeepCustomModelAndSeparateReasoningFields() {
         val messages = listOf(LocalMessage(role = "user", text = "hello"))
         val chat = OpenAiClient.requestBody(provider(ApiProtocol.CHAT_COMPLETIONS), messages)

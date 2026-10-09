@@ -18,21 +18,46 @@ class HomeDeviceTest {
             ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
     }
 
-    @Test fun draftSurvivesModeSwitchAndActivityRecreation() {
-        rule.onNodeWithTag("home-mode-chat").performClick()
+    @Test fun languageCanBeChangedInSettingsAndSurvivesRecreation() {
+        val original = com.codex.remote.ui.AppLanguage.selected(rule.activity)
+        rule.onNodeWithTag("home-menu").performClick()
+        rule.onNodeWithText(label(R.string.ui_253)).performClick()
+        try {
+            for ((tag, title) in listOf("en" to "Settings", "ja" to "設定", "zh" to "设置")) {
+                rule.onNodeWithTag("app-language").performScrollTo().performClick()
+                rule.onNodeWithTag("app-language-$tag").performClick()
+                rule.waitUntil(10_000) { rule.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty() }
+                rule.onNodeWithText(title).assertIsDisplayed()
+                rule.activityRule.scenario.recreate()
+                rule.waitUntil(10_000) { rule.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty() }
+                assertTrue(com.codex.remote.ui.AppLanguage.selected(rule.activity) == tag)
+                java.io.File(rule.activity.getExternalFilesDir(null), "codeb-language-$tag.png").outputStream().use {
+                    androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                }
+            }
+            rule.onNodeWithTag("app-language").performScrollTo().performClick()
+            rule.onNodeWithTag("app-language-system").performClick()
+            rule.waitUntil(10_000) { com.codex.remote.ui.AppLanguage.selected(rule.activity).isEmpty() }
+        } finally {
+            rule.runOnUiThread { com.codex.remote.ui.AppLanguage.select(rule.activity, original) }
+        }
+    }
+
+    @Test fun draftSurvivesSettingsAndActivityRecreation() {
         rule.onNodeWithContentDescription(label(R.string.ui_259)).performClick()
         val draft = "device-check-${UUID.randomUUID()}"
         rule.onNode(hasSetTextAction()).performTextInput(draft)
-        rule.onNodeWithTag("home-mode-work").performClick()
-        rule.onNodeWithTag("home-mode-chat").performClick()
+        rule.onNodeWithTag("home-menu").performClick()
+        rule.onNodeWithText(label(R.string.ui_253)).performClick()
+        rule.onNodeWithContentDescription(label(R.string.ui_151)).performClick()
         rule.waitUntil(5_000) { rule.onAllNodesWithText(draft).fetchSemanticsNodes().isNotEmpty() }
         rule.activityRule.scenario.recreate()
         rule.waitUntil(5_000) { rule.onAllNodesWithText(draft).fetchSemanticsNodes().isNotEmpty() }
         rule.onNodeWithContentDescription(label(R.string.ui_114)).performClick()
         rule.onNodeWithText(label(R.string.ui_258)).performClick()
-        rule.waitUntil(5_000) { rule.onAllNodesWithTag("home-mode-work").fetchSemanticsNodes().isNotEmpty() }
+        rule.onAllNodesWithTag("home-mode-work").assertCountEquals(0)
         rule.onNodeWithContentDescription(label(R.string.ui_114)).performClick()
-        rule.onNodeWithText(label(R.string.ui_257)).performClick()
+        rule.onNodeWithText(label(R.string.saved_files)).performClick()
         rule.onNodeWithText(label(R.string.ui_269)).assertIsDisplayed()
     }
 
@@ -67,10 +92,9 @@ class HomeDeviceTest {
 
     @Test fun sidebarCoversHeaderAndSettingsListsSavedProviders() {
         rule.onNodeWithTag("home-menu").performClick()
-        rule.onNodeWithText("Codex Remote").assertIsDisplayed()
-        val menu = rule.onNodeWithText("Codex Remote").fetchSemanticsNode().boundsInRoot
-        val modes = rule.onNodeWithTag("home-mode-chat").fetchSemanticsNode().boundsInRoot
-        assertTrue(menu.top < modes.bottom)
+        rule.onNodeWithText(label(R.string.app_name)).assertIsDisplayed()
+        val menu = rule.onNodeWithText(label(R.string.app_name)).fetchSemanticsNode().boundsInRoot
+        assertTrue(menu.top < rule.activity.window.decorView.height / 2)
         rule.onNodeWithText(label(R.string.ui_253)).performClick()
         rule.onNodeWithText(label(R.string.api_providers)).assertIsDisplayed()
         rule.onNodeWithText(label(R.string.ui_261)).assertIsDisplayed()

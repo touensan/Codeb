@@ -3,6 +3,7 @@ package com.codex.remote.data.rpc
 import com.codex.remote.domain.TimelineKind
 import com.codex.remote.domain.ThreadGoalStatus
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
@@ -12,6 +13,15 @@ import org.junit.Test
 
 class CodexRpcParsingTest {
     private val json = Json { ignoreUnknownKeys = true }
+
+    @Test fun standardSpeedExplicitlyClearsStickyFastTier() {
+        val params = CodexRpcClient.turnStartParams("thread", "hello", "/srv/app", "model", "high",
+            serviceTier = null, approvalPolicy = "on-request", mentions = emptyList())
+        assertEquals(JsonNull, params["serviceTier"])
+        val fast = CodexRpcClient.turnStartParams("thread", "hello", "/srv/app", "model", "high",
+            serviceTier = "fast", approvalPolicy = "on-request", mentions = emptyList())
+        assertEquals("fast", fast.getValue("serviceTier").jsonPrimitive.content)
+    }
 
     @Test
     fun parsesAgentMessage() {

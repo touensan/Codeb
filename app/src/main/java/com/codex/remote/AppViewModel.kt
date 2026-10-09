@@ -17,6 +17,10 @@ import com.codex.remote.domain.ApprovalKind
 import com.codex.remote.domain.ConnectionDraft
 import com.codex.remote.domain.ConnectionStatus
 import com.codex.remote.domain.ComposerMention
+import com.codex.remote.domain.ComposerDefaults
+import com.codex.remote.domain.forModels
+import com.codex.remote.domain.preservingTurnMetadata
+import com.codex.remote.domain.withTurnRunning
 import com.codex.remote.domain.ComposerMentionKind
 import com.codex.remote.domain.ComposerImageAttachment
 import com.codex.remote.domain.PermissionMode
@@ -54,11 +58,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import java.util.UUID
 
+@OptIn(kotlinx.coroutines.FlowPreview::class)
 class AppViewModel(application: Application, private val managerOnly: Boolean = false, private val autoRestore: Boolean = true) : AndroidViewModel(application) {
     private val store = ConnectionStore(application)
     private val cache = LocalStore(application)
@@ -66,12 +72,25 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     private val _state = MutableStateFlow(AppUiState())
     val state: StateFlow<AppUiState> = _state.asStateFlow()
 
+    suspend fun readArtifact(path: String): ByteArray {
+        val root = _state.value.selectedProjectPath ?: error("Select a workspace first")
+        return (rpc ?: error("SSH is offline")).readArtifact(path, root)
+    }
+
     private var rpc: CodexRpcClient? = null
     private var eventJob: Job? = null
     private var didRestoreLastConnection = false
     private var connectJob: Job? = null
     private var readOnlyJob: Job? = null
     private var selectThreadJob: Job? = null
+    private val threadStates = mutableMapOf<String, AppUiState>()
+    private val resumedThreads = mutableSetOf<String>()
+    private var backgroundCacheJob: Job? = null
+    private val dirtyThreads = mutableSetOf<String>()
+    private val turnVersions = mutableMapOf<String, Long>()
+    private var retryAllowed = true
+    private var retryAt = 0L
+    private var retryDelayMs = 5_000L
 
     init {
         viewModelScope.launch {
@@ -105,13 +124,21 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         }
         if (!managerOnly) viewModelScope.launch {
             _state.map { state -> state.copy(notice = null, showConnections = false, showConnectionEditor = false) }
-                .distinctUntilChanged().collect { snapshot ->
-                    if (snapshot.activeConnection != null && (snapshot.threads.isNotEmpty() || snapshot.selectedThreadId != null)) {
+                .distinctUntilChanged().sample(200).collect { snapshot ->
+                    if (snapshot.activeConnection != null && (snapshot.projects.isNotEmpty() || snapshot.threads.isNotEmpty() || snapshot.selectedThreadId != null)) {
                         val generation = cache.cacheGeneration
                         runCatching { withContext(Dispatchers.IO) { cache.saveRemote(snapshot, generation) } }
                             .onFailure { _state.update { it.copy(notice = uiText(R.string.ui_295, "Local storage failed. Existing files were kept.")) } }
                     }
                 }
+        }
+        if (!managerOnly) viewModelScope.launch {
+            while (isActive) {
+                delay(3_000)
+                val snapshot = _state.value
+                if (retryAllowed && android.os.SystemClock.elapsedRealtime() >= retryAt && snapshot.activeConnection != null && snapshot.connectionStatus == ConnectionStatus.ERROR &&
+                    snapshot.pendingHostKeyFingerprint == null && connectJob?.isActive != true) connect(snapshot.activeConnection)
+            }
         }
     }
 
@@ -152,6 +179,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     }
 
     fun connect(connection: SavedConnection) {
+        retryAllowed = true
         com.codex.remote.data.diagnostics.DebugApi.record("remote_connect")
         if (managerOnly) {
             _state.update { it.copy(activeConnection = connection, showConnections = false,
@@ -186,7 +214,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     archivedThreads = emptyList(),
                     isArchivedThreadsLoading = false,
                     archivedThreadsError = null,
-                    projects = groupThreadsByProject(cachedIndex?.threads.orEmpty()),
+                    projects = groupThreadsByProject(cachedIndex?.threads.orEmpty(), cachedIndex?.projectPaths.orEmpty()),
                     skills = emptyList(),
                     plugins = emptyList(),
                     isComposerCatalogLoading = true,
@@ -197,9 +225,9 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     isGoalLoading = false,
                     goalError = null,
                     models = emptyList(),
-                    selectedModel = null,
-                    selectedReasoningEffort = null,
-                    selectedServiceTier = null,
+                    selectedModel = cachedSession?.model ?: cache.composerDefaults().model,
+                    selectedReasoningEffort = cachedSession?.reasoningEffort ?: cache.composerDefaults().reasoningEffort,
+                    selectedServiceTier = if (cachedSession != null) cachedSession.serviceTier else cache.composerDefaults().serviceTier,
                     collaborationModes = emptyList(),
                     selectedCollaborationMode = "default",
                     permissionProfiles = emptyList(),
@@ -243,9 +271,15 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 store.recordUsed(connection.id)
                 bootstrap
             }.onSuccess { bootstrap ->
-                val projects = groupThreadsByProject(bootstrap.threads)
-                val selectedModel = bootstrap.models.firstOrNull { model -> model.isDefault }
-                    ?: bootstrap.models.firstOrNull()
+                retryDelayMs = 5_000
+                val projects = groupThreadsByProject(bootstrap.threads, _state.value.projects.map { it.path })
+                val savedDefaults = cache.composerDefaults()
+                val defaults = (cachedSession?.let { ComposerDefaults(it.model, it.reasoningEffort, it.serviceTier, isConfigured = true) }
+                    ?: savedDefaults).forModels(bootstrap.models)
+                if (!savedDefaults.isConfigured && cachedSession != null && defaults.model != null) {
+                    runCatching { cache.saveComposerDefaults(defaults) }
+                        .onFailure { _state.update { it.copy(notice = uiText(R.string.ui_295, "Local storage failed. Existing files were kept.")) } }
+                }
                 _state.update {
                     it.copy(
                         connectionStatus = ConnectionStatus.CONNECTED,
@@ -255,9 +289,9 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                             bootstrap.server.codexVersion,
                         ),
                         models = bootstrap.models,
-                        selectedModel = selectedModel?.id,
-                        selectedReasoningEffort = selectedModel?.preferredReasoningEffort(),
-                        selectedServiceTier = selectedModel?.defaultServiceTier,
+                        selectedModel = defaults.model,
+                        selectedReasoningEffort = defaults.reasoningEffort,
+                        selectedServiceTier = defaults.serviceTier,
                         collaborationModes = bootstrap.collaborationModes,
                         selectedCollaborationMode = bootstrap.collaborationModes
                             .firstOrNull { mode -> mode.mode == "default" }?.mode ?: "default",
@@ -280,6 +314,9 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 if (error is CancellationException) throw error
                 rpc?.close()
                 rpc = null
+                retryAt = android.os.SystemClock.elapsedRealtime() + retryDelayMs
+                retryDelayMs = (retryDelayMs * 2).coerceAtMost(60_000)
+                if (generateSequence(error) { it.cause }.any { it is SecurityException }) retryAllowed = false
                 val unknownHostKey = generateSequence(error) { it.cause }
                     .filterIsInstance<UnknownHostKeyException>()
                     .firstOrNull()
@@ -314,19 +351,23 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         }
     }
 
-    fun rejectPendingHostKey() = _state.update {
-        it.copy(
+    fun rejectPendingHostKey() {
+        retryAllowed = false
+        _state.update { it.copy(
             pendingHostKeyFingerprint = null,
             connectionStatus = ConnectionStatus.ERROR,
             connectionMessage = uiText(R.string.ui_297, "已取消未验证主机的连接"),
-        )
+        ) }
     }
 
     fun disconnect() {
+        connectJob?.cancel()
         viewModelScope.launch { disconnectInternal(clearActive = true) }
     }
 
     private fun disconnectInternal(clearActive: Boolean) {
+        rememberThread()
+        resumedThreads.clear()
         selectThreadJob?.cancel()
         readOnlyJob?.cancel()
         eventJob?.cancel()
@@ -389,18 +430,24 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     }
 
     fun newThread() {
+        rememberThread()
         selectThreadJob?.cancel()
         readOnlyJob?.cancel()
         _state.update { state ->
             val projectPath = state.selectedProjectPath ?: state.projects.firstOrNull()?.path
-            if (state.remoteAccount?.canRunCodex != true) {
-                state.copy(notice = uiText(R.string.ui_298, "请先登录远端 Codex"))
-            } else if (projectPath.isNullOrBlank()) {
+            val savedDefaults = cache.composerDefaults()
+            val defaults = (if (!savedDefaults.isConfigured && state.selectedModel != null)
+                ComposerDefaults(state.selectedModel, state.selectedReasoningEffort, state.selectedServiceTier, isConfigured = true)
+                else savedDefaults).forModels(state.models)
+            if (state.connectionStatus == ConnectionStatus.CONNECTED && projectPath.isNullOrBlank()) {
                 state.copy(notice = uiText(R.string.ui_299, "远端没有可用于新会话的 Codex 项目"))
             } else {
                 state.copy(
                     selectedProjectPath = projectPath,
                     selectedThreadId = null,
+                    selectedModel = defaults.model,
+                    selectedReasoningEffort = defaults.reasoningEffort,
+                    selectedServiceTier = defaults.serviceTier,
                     threadGoal = null,
                     isReadOnlyThread = false,
                     isTurnRunning = false,
@@ -424,12 +471,22 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     }
 
     fun selectProject(project: RemoteProject) {
+        if (project.path.isBlank() || '\u0000' in project.path) return
+        rememberThread()
         selectThreadJob?.cancel()
         readOnlyJob?.cancel()
         _state.update {
+            val savedDefaults = cache.composerDefaults()
+            val defaults = (if (!savedDefaults.isConfigured && it.selectedModel != null)
+                ComposerDefaults(it.selectedModel, it.selectedReasoningEffort, it.selectedServiceTier, isConfigured = true)
+                else savedDefaults).forModels(it.models)
             it.copy(
+                projects = groupThreadsByProject(it.threads, it.projects.map { known -> known.path } + project.path),
                 selectedProjectPath = project.path,
                 selectedThreadId = null,
+                selectedModel = defaults.model,
+                selectedReasoningEffort = defaults.reasoningEffort,
+                selectedServiceTier = defaults.serviceTier,
                 isReadOnlyThread = false,
                 isTurnRunning = false,
                 turnStartedAt = 0,
@@ -454,12 +511,19 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     fun selectThread(thread: RemoteThread) {
         val hostId = _state.value.activeConnection?.id ?: return
         val client = rpc
+        rememberThread()
         selectThreadJob?.cancel()
         readOnlyJob?.cancel()
+        threadStates[thread.id]?.takeIf { thread.id in resumedThreads && !it.isBusy }?.let { saved ->
+            _state.update { it.withConversation(saved) }
+            return
+        }
         selectThreadJob = viewModelScope.launch {
+            val remembered = threadStates[thread.id]
             val cached = runCatching { withContext(Dispatchers.IO) { cache.session(hostId, thread.id) } }
                 .getOrElse { if (it is CancellationException) throw it else null }
-            val cachedItems = cached?.timeline.orEmpty().associateBy { it.id }
+            val initialTimeline = remembered?.timeline ?: cached?.timeline.orEmpty()
+            val cachedItems = initialTimeline.associateBy { it.id }
             val projectPath = _state.value.projects
                 .firstOrNull { project -> project.threads.any { it.id == thread.id } }
                 ?.path
@@ -468,13 +532,13 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 it.copy(
                     selectedProjectPath = projectPath,
                     selectedThreadId = thread.id,
-                    turnStartedAt = 0,
+                    turnStartedAt = remembered?.turnStartedAt ?: 0,
                     failedSend = null,
                     threadGoal = null,
                     isGoalLoading = true,
                     goalError = null,
                     threadTokenUsage = null,
-                    timeline = cached?.timeline.orEmpty(),
+                    timeline = initialTimeline,
                     olderHistoryCursor = null,
                     hasOlderHistory = false,
                     isOlderHistoryLoading = false,
@@ -482,16 +546,17 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     consumedHistoryCursors = emptySet(),
                     isBusy = client != null,
                     isReadOnlyThread = false,
-                    isTurnRunning = thread.status.isRemoteThreadActive(),
-                    activeTurnId = null,
+                    isTurnRunning = remembered?.isTurnRunning ?: thread.status.isRemoteThreadActive(),
+                    activeTurnId = remembered?.activeTurnId,
                 )
             }
             if (client == null) return@launch
+            val initialTurnVersion = turnVersions[thread.id] ?: 0
             val session = runCatching { client.resumeThread(thread.id, thread.cwd) }
                 .getOrElse { error ->
                     if (error is CancellationException) throw error
                     if (error.message.orEmpty().contains("active writer", true)) {
-                        _state.update { it.copy(isBusy = false, isGoalLoading = false, isReadOnlyThread = true, isTurnRunning = false) }
+                        _state.update { it.copy(isBusy = false, isGoalLoading = false, isReadOnlyThread = true) }
                         readOnlyJob = viewModelScope.launch {
                             while (isActive && _state.value.selectedThreadId == thread.id) {
                                 runCatching { client.readThreadSession(thread.id, thread.cwd) }.onSuccess { read ->
@@ -518,23 +583,30 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 if (state.selectedThreadId != thread.id) return@update state
                 val model = state.models.firstOrNull { it.id == session.model }
                 val liveItems = state.timeline.filter { cachedItems[it.id] != it }.associateBy { it.id }
+                val confirmedBodies = session.timeline.filter { it.kind == TimelineKind.USER }.mapTo(mutableSetOf()) { it.body }
+                val restoredTimeline = state.timeline.filterNot { item ->
+                    item.id.startsWith("local-") && item.status.isBlank() && cachedItems[item.id] == item && item.body in confirmedBodies
+                }
                 state.copy(
                     // Keep live events received after resume, while refreshing stale disk items.
-                    timeline = mergeTimelineHistory(state.timeline, session.timeline.map { liveItems[it.id] ?: it }),
+                    timeline = mergeTimelineHistory(restoredTimeline, session.timeline.map { liveItems[it.id]?.preservingTurnMetadata(it) ?: it }),
                     olderHistoryCursor = session.olderHistoryCursor,
                     hasOlderHistory = session.olderHistoryCursor != null,
                     isOlderHistoryLoading = false,
                     olderHistoryError = null,
                     consumedHistoryCursors = emptySet(),
                     isBusy = false,
+                    isTurnRunning = if ((turnVersions[thread.id] ?: 0) != initialTurnVersion) state.isTurnRunning else session.activeTurnId != null,
+                    activeTurnId = if ((turnVersions[thread.id] ?: 0) != initialTurnVersion) state.activeTurnId else session.activeTurnId,
+                    turnStartedAt = if (session.activeTurnId != null && state.turnStartedAt == 0L) android.os.SystemClock.elapsedRealtime() -
+                        (session.turnStartedAtEpochMs?.let { (System.currentTimeMillis() - it).coerceAtLeast(0) } ?: 0) else state.turnStartedAt,
                     selectedModel = model?.id ?: state.selectedModel,
                     selectedReasoningEffort = session.reasoningEffort
                         ?.takeIf { effort -> model?.supports(effort) == true }
                         ?: model?.preferredReasoningEffort()
                         ?: state.selectedReasoningEffort,
                     selectedServiceTier = session.serviceTier
-                        ?.takeIf { tier -> model?.serviceTiers?.any { it.id == tier } == true }
-                        ?: model?.defaultServiceTier,
+                        ?.takeIf { tier -> model?.serviceTiers?.any { it.id == tier } == true },
                     selectedCollaborationMode = session.collaborationMode
                         ?.takeIf { mode -> state.collaborationModes.any { it.mode == mode } }
                         ?: state.defaultCollaborationMode(),
@@ -543,6 +615,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     approvalsReviewer = session.approvalsReviewer ?: state.approvalsReviewer,
                 )
             }
+            resumedThreads += thread.id
             runCatching { client.getThreadGoal(thread.id) }
                 .onSuccess { goal ->
                     _state.update { state ->
@@ -701,6 +774,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         }
         viewModelScope.launch {
             val localItemId = "local-${UUID.randomUUID()}"
+            var targetThreadId = currentState.selectedThreadId
             val userItem = TimelineItem(
                 id = localItemId,
                 kind = TimelineKind.USER,
@@ -712,6 +786,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     }
                 },
                 isGoal = asGoal,
+                turnId = steeringTurnId,
             )
             _state.update {
                 it.copy(
@@ -724,6 +799,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     notice = null,
                 )
             }
+            val outgoingState = _state.value
             runCatching {
                 if (steeringThreadId != null && steeringTurnId != null) {
                     client.steerTurn(
@@ -735,7 +811,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     )
                     return@runCatching
                 }
-                val threadId = _state.value.selectedThreadId ?: client.startThread(
+                val threadId = targetThreadId ?: client.startThread(
                     cwd = cwd,
                     model = selectedModel,
                     serviceTier = selectedServiceTier,
@@ -744,12 +820,17 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     permissionProfile = permissionProfile,
                 ).let { started ->
                     val thread = RemoteThread(started.id, prompt.take(80), cwd, System.currentTimeMillis() / 1000, "active")
+                    val startedState = outgoingState.copy(selectedThreadId = started.id, selectedProjectPath = cwd)
+                    threadStates[started.id] = startedState
+                    resumedThreads += started.id
                     _state.update {
-                        it.copy(
+                        val index = it.threads.filterNot { existing -> existing.id == thread.id } + thread
+                        val indexed = it.copy(threads = index, projects = groupThreadsByProject(index, it.projects.map { project -> project.path }))
+                        if (it.timeline.none { item -> item.id == localItemId }) indexed else indexed.copy(
                             threads = it.threads.filterNot { existing -> existing.id == thread.id } + thread,
-                            projects = groupThreadsByProject(it.threads.filterNot { existing -> existing.id == thread.id } + thread),
+                            projects = groupThreadsByProject(it.threads.filterNot { existing -> existing.id == thread.id } + thread, it.projects.map { project -> project.path }),
                             selectedThreadId = started.id,
-                            selectedModel = started.model ?: it.selectedModel,
+                            selectedModel = selectedModel,
                             selectedReasoningEffort = selectedReasoningEffort
                                 ?: started.reasoningEffort
                                 ?: it.selectedReasoningEffort,
@@ -758,6 +839,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     }
                     started.id
                 }
+                targetThreadId = threadId
                 if (asGoal) {
                     val goal = client.setThreadGoal(
                         threadId = threadId,
@@ -792,7 +874,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     _state.update { it.copy(notice = uiText(R.string.ui_307, "已追加到当前运行中的任务")) }
                 }
             }.onFailure { error ->
-                _state.update {
+                val markFailed: (AppUiState) -> AppUiState = {
                     it.copy(
                         timeline = it.timeline.map { item -> if (item.id == localItemId) item.copy(status = "sendFailed", title = friendlyError(error)) else item },
                         isTurnRunning = if (asGoal) it.isTurnRunning else steeringThreadId != null,
@@ -802,13 +884,15 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         failedSend = FailedSend(localItemId, prompt, mentions, attachments, asGoal),
                     )
                 }
+                if (targetThreadId != null) updateThreadState(targetThreadId, markFailed)
+                else _state.update { if (it.timeline.any { item -> item.id == localItemId }) markFailed(it) else it }
                 com.codex.remote.data.diagnostics.DebugApi.record("remote.send.failed", error)
                 val failedState = _state.value
-                val draftKey = failedState.selectedThreadId ?: "project:${cwd}"
+                val draftKey = targetThreadId ?: "project:${cwd}"
                 runCatching { withContext(Dispatchers.IO) {
                     val store = com.codex.remote.data.store.LocalStore(getApplication())
-                    if (store.draft(failedState.activeConnection?.id.orEmpty(), draftKey).isBlank()) {
-                        store.saveDraft(failedState.activeConnection?.id.orEmpty(), draftKey, prompt)
+                    if (store.draft(currentState.activeConnection?.id.orEmpty(), draftKey).isBlank()) {
+                        store.saveDraft(currentState.activeConnection?.id.orEmpty(), draftKey, prompt)
                     }
                 } }.onFailure { cacheError ->
                     if (cacheError is CancellationException) throw cacheError
@@ -892,7 +976,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         val threads = (listOf(restored) + state.threads).distinctBy { it.id }
                         state.copy(
                             threads = threads,
-                            projects = groupThreadsByProject(threads),
+                            projects = groupThreadsByProject(threads, state.projects.map { project -> project.path }),
                             archivedThreads = state.archivedThreads.filterNot { it.id == restored.id },
                             notice = uiText(R.string.ui_309, "任务已恢复"),
                         )
@@ -927,7 +1011,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         val threads = state.threads.map { current ->
                             if (current.id == updated.id) updated else current
                         }
-                        state.copy(threads = threads, projects = groupThreadsByProject(threads))
+                        state.copy(threads = threads, projects = groupThreadsByProject(threads, state.projects.map { project -> project.path }))
                     }
                 }
                 .onFailure(::showError)
@@ -982,7 +1066,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     val model = state.models.firstOrNull { it.id == forked.session.model }
                     state.copy(
                         threads = threads,
-                        projects = groupThreadsByProject(threads),
+                        projects = groupThreadsByProject(threads, state.projects.map { project -> project.path }),
                         selectedProjectPath = forked.thread.cwd.ifBlank { state.selectedProjectPath.orEmpty() },
                         selectedThreadId = forked.thread.id,
                         threadGoal = null,
@@ -1001,8 +1085,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                             ?: model?.preferredReasoningEffort()
                             ?: state.selectedReasoningEffort,
                         selectedServiceTier = forked.session.serviceTier
-                            ?.takeIf { tier -> model?.serviceTiers?.any { it.id == tier } == true }
-                            ?: model?.defaultServiceTier,
+                            ?.takeIf { tier -> model?.serviceTiers?.any { it.id == tier } == true },
                         selectedCollaborationMode = forked.session.collaborationMode
                             ?.takeIf { mode -> state.collaborationModes.any { it.mode == mode } }
                             ?: state.defaultCollaborationMode(),
@@ -1322,27 +1405,33 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         }
     }
 
-    fun setModel(modelId: String) = _state.update { state ->
-        val model = state.models.firstOrNull { it.id == modelId } ?: return@update state
-        state.copy(
-            selectedModel = model.id,
-            selectedReasoningEffort = model.preferredReasoningEffort(),
-            selectedServiceTier = model.defaultServiceTier,
-        )
+    fun setModel(modelId: String) {
+        val state = _state.value
+        if (state.models.none { it.id == modelId }) return
+        val defaults = ComposerDefaults(modelId, state.selectedReasoningEffort, state.selectedServiceTier, isConfigured = true).forModels(state.models)
+        _state.update { it.copy(selectedModel = defaults.model, selectedReasoningEffort = defaults.reasoningEffort, selectedServiceTier = defaults.serviceTier) }
+        saveComposerDefaults()
     }
 
-    fun setReasoningEffort(effort: String) = _state.update { state ->
-        val model = state.models.firstOrNull { it.id == state.selectedModel }
-        if (model?.supports(effort) == true) state.copy(selectedReasoningEffort = effort) else state
+    fun setReasoningEffort(effort: String) {
+        val state = _state.value
+        if (state.models.firstOrNull { it.id == state.selectedModel }?.supports(effort) != true) return
+        _state.update { it.copy(selectedReasoningEffort = effort) }
+        saveComposerDefaults()
     }
 
-    fun setServiceTier(serviceTier: String?) = _state.update { state ->
-        val model = state.models.firstOrNull { it.id == state.selectedModel } ?: return@update state
-        if (serviceTier == null || model.serviceTiers.any { it.id == serviceTier }) {
-            state.copy(selectedServiceTier = serviceTier)
-        } else {
-            state
-        }
+    fun setServiceTier(serviceTier: String?) {
+        val state = _state.value
+        val model = state.models.firstOrNull { it.id == state.selectedModel } ?: return
+        if (serviceTier != null && model.serviceTiers.none { it.id == serviceTier }) return
+        _state.update { it.copy(selectedServiceTier = serviceTier) }
+        saveComposerDefaults()
+    }
+
+    private fun saveComposerDefaults() {
+        val state = _state.value
+        runCatching { cache.saveComposerDefaults(ComposerDefaults(state.selectedModel, state.selectedReasoningEffort, state.selectedServiceTier)) }
+            .onFailure { _state.update { it.copy(notice = uiText(R.string.ui_295, "Local storage failed. Existing files were kept.")) } }
     }
 
     fun setCollaborationMode(mode: String) = _state.update { state ->
@@ -1428,6 +1517,24 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 }
         }
     }
+    fun createRemoteDirectory(parent: String, name: String) {
+        val client = rpc ?: return
+        val snapshot = _state.value
+        if (snapshot.isRemoteDirectoryLoading || snapshot.remoteDirectoryPath != parent || snapshot.remoteDirectoryError != null) return
+        _state.update { it.copy(isRemoteDirectoryLoading = true, remoteDirectoryError = null) }
+        viewModelScope.launch {
+            try {
+                val path = client.createRemoteDirectory(parent, name)
+                if (rpc === client && _state.value.remoteDirectoryPath == parent) loadRemoteDirectory(path)
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                if (rpc === client) _state.update { state ->
+                    if (state.remoteDirectoryPath != parent) state else state.copy(isRemoteDirectoryLoading = false, remoteDirectoryError = friendlyError(error))
+                }
+            }
+        }
+    }
+
     fun clearRemoteDirectory() = _state.update {
         it.copy(
             remoteDirectoryPath = null,
@@ -1449,30 +1556,24 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     is AppServerEvent.ReasoningDelta -> appendDelta(event.threadId, event.itemId, event.delta, TimelineKind.REASONING)
                     is AppServerEvent.OutputDelta -> appendDelta(event.threadId, event.itemId, event.delta, TimelineKind.COMMAND)
                     is AppServerEvent.TurnRunning -> {
-                        if (!_state.value.acceptsThreadEvent(event.threadId)) return@collect
-                        _state.update { state ->
-                            state.copy(
-                                isTurnRunning = event.running,
-                                turnStartedAt = if (event.running && (!state.isTurnRunning || state.turnStartedAt == 0L)) android.os.SystemClock.elapsedRealtime() else state.turnStartedAt,
-                                activeTurnId = if (event.running) event.turnId else null,
-                                timeline = if (event.running) {
-                                    state.timeline
-                                } else {
-                                    state.timeline.withRunningItemsCompleted()
-                                },
-                            )
+                        event.threadId?.let { turnVersions[it] = (turnVersions[it] ?: 0) + 1 }
+                        updateThreadState(event.threadId) { state ->
+                            state.withTurnRunning(event.threadId, event.turnId, event.running,
+                                android.os.SystemClock.elapsedRealtime(), System.currentTimeMillis(), event.elapsedMs, event.completedAt)
                         }
+                        _state.update { it.withTurnRunning(event.threadId, event.turnId, event.running,
+                            android.os.SystemClock.elapsedRealtime(), System.currentTimeMillis(), event.elapsedMs, event.completedAt) }
                         if (!event.running) {
                             refreshThreads()
                         }
                     }
-                    is AppServerEvent.Approval -> _state.update { state ->
+                    is AppServerEvent.Approval -> updateThreadState(event.threadId) { state ->
                         if (state.acceptsThreadEvent(event.threadId)) state.copy(pendingApproval = event.request) else state
                     }
                     AppServerEvent.AccountChanged -> refreshRemoteAccount()
                     AppServerEvent.ThreadsChanged -> refreshThreads()
                     AppServerEvent.SkillsChanged -> refreshComposerCatalog(forceReload = true)
-                    is AppServerEvent.GoalUpdated -> _state.update { state ->
+                    is AppServerEvent.GoalUpdated -> updateThreadState(event.threadId) { state ->
                         if (state.selectedThreadId == event.threadId) {
                             state.copy(threadGoal = event.goal, isGoalLoading = false, goalError = null)
                         } else {
@@ -1480,7 +1581,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         }
                     }
                     is AppServerEvent.GoalCleared -> {
-                        _state.update { state ->
+                        updateThreadState(event.threadId) { state ->
                             if (state.selectedThreadId == event.threadId) {
                                 state.copy(threadGoal = null, isGoalLoading = false, goalError = null)
                             } else {
@@ -1488,7 +1589,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                             }
                         }
                     }
-                    is AppServerEvent.TokenUsageUpdated -> _state.update { state ->
+                    is AppServerEvent.TokenUsageUpdated -> updateThreadState(event.threadId) { state ->
                         if (state.selectedThreadId == event.threadId) {
                             state.copy(threadTokenUsage = event.usage)
                         } else {
@@ -1527,7 +1628,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         if (state.selectedThreadId != event.threadId) return@update state
                         val model = state.models.firstOrNull { it.id == event.settings.model }
                         state.copy(
-                            selectedModel = model?.id ?: state.selectedModel,
+                            selectedModel = state.selectedModel,
                             selectedReasoningEffort = event.settings.reasoningEffort
                                 ?.takeIf { effort -> model?.supports(effort) == true }
                                 ?: state.selectedReasoningEffort,
@@ -1554,19 +1655,21 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                             }
                         }
                     }
-                    is AppServerEvent.Failure -> _state.update { state ->
+                    is AppServerEvent.Failure -> updateThreadState(event.threadId) { state ->
                         if (state.acceptsThreadEvent(event.threadId)) {
-                            state.copy(
+                            state.withTurnRunning(event.threadId, state.activeTurnId, false,
+                                android.os.SystemClock.elapsedRealtime(), System.currentTimeMillis()).copy(
                                 notice = event.message,
-                                isTurnRunning = false,
-                                activeTurnId = null,
-                                timeline = state.timeline.withRunningItemsCompleted(),
                             )
                         } else {
                             state
                         }
                     }
                     is AppServerEvent.Warning -> _state.update { it.copy(notice = event.message) }
+                    AppServerEvent.ConnectionLost -> {
+                        rememberThread()
+                        _state.update { it.copy(connectionStatus = ConnectionStatus.ERROR, connectionMessage = uiText(R.string.ui_079, "Disconnected")) }
+                    }
                     is AppServerEvent.Diagnostic -> {
                         if (event.message.contains("not found", ignoreCase = true) ||
                             event.message.contains("not recognized", ignoreCase = true)
@@ -1596,7 +1699,6 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         ?: selected?.preferredReasoningEffort()
                     val serviceTier = state.selectedServiceTier
                         ?.takeIf { tier -> selected?.serviceTiers?.any { it.id == tier } == true }
-                        ?: selected?.defaultServiceTier
                     state.copy(
                         remoteAccount = account,
                         models = models,
@@ -1650,20 +1752,47 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         }
     }
 
-    private fun upsertItem(threadId: String?, item: TimelineItem) = _state.update { state ->
-        if (!state.acceptsThreadEvent(threadId)) return@update state
+    private fun upsertItem(threadId: String?, item: TimelineItem) = updateThreadState(threadId) { state ->
         val index = state.timeline.indexOfFirst { it.id == item.id }
+        val update = item.copy(turnId = item.turnId ?: state.activeTurnId).preservingTurnMetadata(state.timeline.getOrNull(index))
         val localUserIndex = if (item.kind == TimelineKind.USER) {
-            state.timeline.indexOfLast { it.id.startsWith("local-") && it.kind == TimelineKind.USER && it.body == item.body }
+            state.timeline.indexOfLast { it.id.startsWith("local-") && it.kind == TimelineKind.USER && it.status != "sendFailed" && it.body == item.body && (it.turnId == null || it.turnId == update.turnId) }
         } else -1
         if (index < 0 && localUserIndex >= 0) {
-            state.copy(timeline = state.timeline.toMutableList().also { it[localUserIndex] = item })
-        } else if (index < 0) state.copy(timeline = state.timeline + item)
-        else state.copy(timeline = state.timeline.toMutableList().also { it[index] = item })
+            state.copy(timeline = state.timeline.toMutableList().also { it[localUserIndex] = update })
+        } else if (index < 0) state.copy(timeline = state.timeline + update)
+        else state.copy(timeline = state.timeline.toMutableList().also { it[index] = update })
     }
 
     private fun appendDelta(threadId: String?, id: String, delta: String, kind: TimelineKind) =
-        _state.update { it.withStreamDelta(threadId, id, delta, kind) }
+        updateThreadState(threadId) { it.withStreamDelta(threadId, id, delta, kind) }
+
+    private fun rememberThread() {
+        val snapshot = _state.value
+        snapshot.selectedThreadId?.let { threadStates[it] = snapshot }
+    }
+
+    private fun updateThreadState(threadId: String?, transform: (AppUiState) -> AppUiState) {
+        if (threadId == null) return
+        if (_state.value.selectedThreadId == threadId) _state.update(transform)
+        else threadStates[threadId]?.let { saved ->
+            val updated = transform(saved)
+            threadStates[threadId] = updated
+            if (updated != saved) dirtyThreads += threadId
+            if (dirtyThreads.isNotEmpty() && backgroundCacheJob?.isActive != true) {
+                backgroundCacheJob = viewModelScope.launch {
+                    while (dirtyThreads.isNotEmpty()) {
+                        delay(200)
+                        val snapshots = dirtyThreads.filter { it != _state.value.selectedThreadId }.mapNotNull { threadStates[it] }
+                        dirtyThreads.clear()
+                        val generation = cache.cacheGeneration
+                        withContext(Dispatchers.IO) { snapshots.forEach { runCatching { cache.saveRemote(it, generation, saveIndex = false) }
+                            .onFailure { com.codex.remote.data.diagnostics.DebugApi.record("remote_cache_error", it) } } }
+                    }
+                }
+            }
+        }
+    }
 
     private fun refreshThreads() {
         val client = rpc ?: return
@@ -1766,6 +1895,20 @@ private data class ConnectionBootstrap(
 internal fun AppUiState.acceptsThreadEvent(threadId: String?): Boolean =
     selectedThreadId != null && selectedThreadId == threadId
 
+internal fun AppUiState.withConversation(saved: AppUiState): AppUiState = copy(
+    selectedThreadId = saved.selectedThreadId, selectedProjectPath = saved.selectedProjectPath,
+    timeline = saved.timeline, olderHistoryCursor = saved.olderHistoryCursor, hasOlderHistory = saved.hasOlderHistory,
+    consumedHistoryCursors = saved.consumedHistoryCursors, isOlderHistoryLoading = false, olderHistoryError = null,
+    isTurnRunning = saved.isTurnRunning, activeTurnId = saved.activeTurnId, turnStartedAt = saved.turnStartedAt,
+    selectedModel = saved.selectedModel, selectedReasoningEffort = saved.selectedReasoningEffort,
+    selectedServiceTier = saved.selectedServiceTier, selectedCollaborationMode = saved.selectedCollaborationMode,
+    selectedPermissionProfile = saved.selectedPermissionProfile, approvalPolicy = saved.approvalPolicy,
+    approvalsReviewer = saved.approvalsReviewer, pendingApproval = saved.pendingApproval,
+    threadGoal = saved.threadGoal, threadTokenUsage = saved.threadTokenUsage,
+    failedSend = saved.failedSend, isReadOnlyThread = saved.isReadOnlyThread, isBusy = false,
+    isGoalLoading = false, goalError = null,
+)
+
 internal fun List<SavedConnection>.lastUsedConnectionOrNull(): SavedConnection? =
     maxByOrNull(SavedConnection::lastUsedAt)?.takeIf { it.lastUsedAt > 0 }
 
@@ -1809,7 +1952,7 @@ private fun RemoteModel.supports(effort: String): Boolean =
     supportedReasoningEfforts.any { it.value == effort }
 
 private fun RemoteModel.preferredReasoningEffort(): String? =
-    defaultReasoningEffort?.takeIf(::supports)
+    "medium".takeIf(::supports) ?: defaultReasoningEffort?.takeIf(::supports)
         ?: supportedReasoningEfforts.firstOrNull()?.value
 
 private fun AppUiState.defaultCollaborationMode(): String =

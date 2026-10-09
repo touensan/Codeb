@@ -1,10 +1,14 @@
 package com.codex.remote
 
 import android.graphics.Typeface
+import android.graphics.Bitmap
+import android.content.ClipboardManager
+import android.content.Context
 import android.text.Spanned
 import android.text.style.StyleSpan
 import android.view.View
 import android.view.ViewGroup
+import android.view.WindowManager
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.MutableState
@@ -13,26 +17,41 @@ import androidx.compose.ui.semantics.SemanticsProperties
 import androidx.compose.ui.test.assertContentDescriptionEquals
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsNotDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasTestTag
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performTextClearance
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.swipeUp
+import androidx.compose.ui.test.click
+import androidx.compose.ui.test.longClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.codex.remote.data.rpc.CodexRpcClient
 import com.codex.remote.data.store.ConnectionStore
+import com.codex.remote.data.store.LocalStore
 import com.codex.remote.domain.AppUiState
 import com.codex.remote.domain.AuthType
 import com.codex.remote.domain.ComposerImageAttachment
 import com.codex.remote.domain.ComposerMention
+import com.codex.remote.domain.ConnectionStatus
 import com.codex.remote.domain.FileChangeSummary
 import com.codex.remote.domain.PermissionMode
 import com.codex.remote.domain.ReasoningEffortOption
@@ -68,6 +87,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.text.DateFormat
+import java.io.File
+import java.util.Date
 import java.util.UUID
 import kotlin.math.abs
 
@@ -84,7 +106,9 @@ class WorkspaceDeviceTest {
 
         composeRule.onAllNodesWithText("Default", substring = true).assertCountEquals(0)
         composeRule.onAllNodesWithText("Plan", substring = true).assertCountEquals(0)
-        composeRule.onNodeWithText("5.6-sol · Ultra · Fast").assertExists()
+        composeRule.onNodeWithText("5.6 Sol Ultra").assertExists()
+        composeRule.onAllNodesWithText("Fast").assertCountEquals(0)
+        composeRule.onNodeWithContentDescription("Fast", useUnmergedTree = true).assertExists()
         composeRule.onNodeWithTag(COMPOSER_CONTEXT).assertContentDescriptionEquals("上下文已使用 64%")
 
         val add = composeRule.onNodeWithTag(COMPOSER_ADD).fetchSemanticsNode().boundsInRoot
@@ -131,13 +155,229 @@ class WorkspaceDeviceTest {
         composeRule.runOnIdle { assertEquals(listOf("retry this" to false), callbacks.sentMessages) }
     }
 
-    @Test fun modelSheetHasCheckmarksReasoningAndDone() {
+    @Test fun modelMenuIsAnchoredAndOffersReasoningModelAndSpeed() {
         val state = mutableStateOf(baseState())
-        show(state)
+        val callbacks = WorkspaceCallbacks()
+        show(state, callbacks)
+        composeRule.onNodeWithTag(COMPOSER_INPUT).performClick()
+        composeRule.waitUntil(5_000) { keyboardVisible() }
         composeRule.onNodeWithTag(COMPOSER_MODEL).performClick()
-        composeRule.onNodeWithText("Configuration").assertIsDisplayed()
-        composeRule.onNodeWithText("GPT-5.6-Sol").assertIsDisplayed()
-        composeRule.onNodeWithText("Done").assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag(MODEL_MENU).assertIsDisplayed()
+        assertTrue(keyboardVisible())
+        composeRule.onNodeWithText("Configuration").assertDoesNotExist()
+        composeRule.onNodeWithText("Done").assertDoesNotExist()
+        composeRule.onNodeWithText("Ultra").assertIsDisplayed().assertIsSelected()
+        composeRule.onNodeWithText("Low").assertIsNotSelected()
+        composeRule.onNodeWithText("Model").assertIsDisplayed()
+        composeRule.onNodeWithText("Speed").assertIsDisplayed()
+
+        saveScreenshot("qa-model-menu.png")
+
+        composeRule.onNodeWithText("Model").performClick()
+        composeRule.onNodeWithText("GPT-5.6-Sol").assertIsDisplayed().assertIsSelected().performClick()
+        composeRule.runOnIdle { assertEquals("gpt-5.6-sol", callbacks.model) }
+        composeRule.onNodeWithText("Model").performClick()
+        composeRule.onNode(hasContentDescription("Back") and hasAnyAncestor(hasTestTag(MODEL_MENU))).performClick()
+        composeRule.onNodeWithText("Low").performClick()
+        composeRule.runOnIdle { assertEquals("low", callbacks.reasoningEffort) }
+
+        composeRule.onNodeWithTag(COMPOSER_MODEL).performClick()
+        composeRule.onNodeWithText("Low").assertIsSelected()
+        composeRule.onNodeWithText("Speed").performClick()
+        composeRule.onNodeWithText("Fast").assertIsSelected()
+        saveScreenshot("qa-speed-menu.png")
+        composeRule.onNodeWithText("Standard").assertIsDisplayed().assertIsNotSelected().performClick()
+        composeRule.runOnIdle { assertEquals(null, callbacks.serviceTier) }
+        composeRule.onAllNodesWithContentDescription("Fast", useUnmergedTree = true).assertCountEquals(0)
+
+        composeRule.onNodeWithTag(COMPOSER_MODEL).performClick()
+        composeRule.onNodeWithText("Speed").performClick()
+        composeRule.onNodeWithText("Standard").assertIsSelected()
+        composeRule.onNodeWithText("Fast").assertIsDisplayed().assertIsNotSelected().performClick()
+        composeRule.runOnIdle { assertEquals("fast", callbacks.serviceTier) }
+        composeRule.onNodeWithContentDescription("Fast", useUnmergedTree = true).assertExists()
+    }
+
+    @Test fun connectingKeepsCachedReplyAndDraftWithoutAConversationBanner() {
+        val state = mutableStateOf(baseState(
+            timeline = listOf(TimelineItem("cached", TimelineKind.AGENT, body = "Cached reply")),
+        ).copy(connectionStatus = ConnectionStatus.CONNECTING, connectionMessage = "Connecting QA Host"))
+        val callbacks = WorkspaceCallbacks()
+        show(state, callbacks)
+
+        composeRule.onNodeWithTag("timeline-agent-cached").assertIsDisplayed()
+        composeRule.onAllNodesWithText("Connecting QA Host").assertCountEquals(0)
+        composeRule.onNodeWithTag(COMPOSER_INPUT).assertIsDisplayed().assertIsEnabled().performTextInput("draft while connecting")
+        composeRule.onNodeWithTag(COMPOSER_SEND).assertIsNotEnabled()
+        assertEquals("draft while connecting", composerText())
+        composeRule.runOnIdle {
+            assertTrue(callbacks.sentMessages.isEmpty())
+            state.value = state.value.copy(connectionStatus = ConnectionStatus.CONNECTED)
+        }
+        composeRule.onNodeWithTag(COMPOSER_SEND).assertIsEnabled().performClick()
+        composeRule.runOnIdle { assertEquals(listOf("draft while connecting" to false), callbacks.sentMessages) }
+    }
+
+    @Test fun disconnectedKeepsComposerTypeableButCannotSend() {
+        val state = mutableStateOf(baseState().copy(connectionStatus = ConnectionStatus.DISCONNECTED))
+        val callbacks = WorkspaceCallbacks()
+        show(state, callbacks)
+
+        composeRule.onNodeWithTag(COMPOSER_INPUT).assertIsDisplayed().assertIsEnabled().performTextInput("offline draft")
+        composeRule.onNodeWithTag(COMPOSER_SEND).assertIsNotEnabled()
+        assertEquals("offline draft", composerText())
+        composeRule.runOnIdle {
+            assertTrue(callbacks.sentMessages.isEmpty())
+        }
+    }
+
+    @Test fun freshProjectKeepsPretypedDraftWhenConnectionResolvesItsPath() {
+        val state = mutableStateOf(baseState(threads = emptyList()).copy(
+            selectedThreadId = null,
+            selectedProjectPath = null,
+            connectionStatus = ConnectionStatus.CONNECTING,
+        ))
+        val callbacks = WorkspaceCallbacks()
+        show(state, callbacks)
+        composeRule.onNodeWithTag(COMPOSER_INPUT).performTextInput("draft before project loads")
+        composeRule.onNodeWithTag(COMPOSER_SEND).assertIsNotEnabled()
+        composeRule.runOnIdle {
+            state.value = state.value.copy(
+                selectedProjectPath = "/workspace/demo",
+                connectionStatus = ConnectionStatus.CONNECTED,
+            )
+        }
+        assertEquals("draft before project loads", composerText())
+        composeRule.onNodeWithTag(COMPOSER_SEND).assertIsEnabled().performClick()
+        composeRule.runOnIdle {
+            assertEquals(listOf("draft before project loads" to false), callbacks.sentMessages)
+        }
+    }
+
+    @Test fun completedReplyOwnsDurationEditedFilesCopyAndCompletionTime() {
+        val completedAt = 1_791_522_420_000L
+        val reply = "Updated the file."
+        val state = mutableStateOf(baseState(timeline = listOf(
+            TimelineItem("question", TimelineKind.USER, body = "Update the file", turnId = "t1"),
+            TimelineItem("files", TimelineKind.FILE_CHANGE, status = "completed", turnId = "t1",
+                fileChanges = listOf(FileChangeSummary("src/Main.kt", "update",
+                    "--- a/src/Main.kt\n+++ b/src/Main.kt\n-old\n+new"))),
+            TimelineItem("answer", TimelineKind.AGENT, body = reply, status = "completed", turnId = "t1",
+                elapsedMs = 20_000, completedAt = completedAt),
+        )))
+        show(state)
+
+        composeRule.onNodeWithTag("reply-duration-answer").assertIsDisplayed()
+        assertTrue(composeRule.onNodeWithTag("reply-duration-answer").fetchSemanticsNode()
+            .config[SemanticsProperties.Text].any { "20" in it.text })
+        composeRule.onNodeWithTag("file-changes-reply-answer").assertIsDisplayed()
+        composeRule.onAllNodesWithTag("file-changes-files").assertCountEquals(0)
+        composeRule.onNodeWithText("src/Main.kt").assertDoesNotExist()
+        composeRule.onNodeWithText("已编辑 1 个文件").performClick()
+        composeRule.onNodeWithText("src/Main.kt").assertExists()
+        composeRule.onNodeWithText("+new").assertExists()
+        composeRule.onNodeWithTag("reply-time-answer").assertIsDisplayed()
+        saveScreenshot("qa-reply-footer.png")
+        composeRule.onNodeWithTag("reply-copy-answer").performScrollTo().assertIsDisplayed().performClick()
+        composeRule.runOnIdle {
+            val clipboard = composeRule.activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            assertEquals(reply, clipboard.primaryClip?.getItemAt(0)?.coerceToText(composeRule.activity)?.toString())
+        }
+        composeRule.onNodeWithTag("reply-time-answer").assertIsDisplayed()
+        val expectedTime = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(completedAt))
+        assertEquals(expectedTime, composeRule.onNodeWithTag("reply-time-answer").fetchSemanticsNode()
+            .config[SemanticsProperties.Text].single().text)
+    }
+
+    @Test fun runningConversationUsesDotsAndTheSentPromptCanBeCopied() {
+        val prompt = "Please read this 🙂\nSecond line"
+        val state = mutableStateOf(baseState(timeline = listOf(TimelineItem("question", TimelineKind.USER, body = prompt)), isTurnRunning = true))
+        show(state)
+        composeRule.onNodeWithTag("reply-loading-dots").assertIsDisplayed()
+        composeRule.onNodeWithText("Working").assertDoesNotExist()
+        composeRule.onNodeWithText("正在执行").assertDoesNotExist()
+        composeRule.onNodeWithTag("prompt-copy-question").performClick()
+        composeRule.runOnIdle {
+            val clipboard = composeRule.activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            assertEquals(prompt, clipboard.primaryClip?.getItemAt(0)?.coerceToText(composeRule.activity)?.toString())
+        }
+        composeRule.runOnIdle { state.value = state.value.copy(timeline = state.value.timeline + TimelineItem("answer", TimelineKind.AGENT, body = "Partial reply", status = "inProgress")) }
+        composeRule.onNodeWithTag("reply-loading-dots").assertIsDisplayed()
+    }
+
+    @Test fun oneCopyButtonWaitsForTheWholeTurnAndFullyDisplayedReply() {
+        val state = mutableStateOf(baseState(timeline = listOf(
+            TimelineItem("question", TimelineKind.USER, body = "Question", turnId = "t1"),
+            TimelineItem("commentary", TimelineKind.AGENT, body = "I will read it.", status = "completed", turnId = "t1"),
+            TimelineItem("answer", TimelineKind.AGENT, body = "第一句。第二句还没有", status = "inProgress", turnId = "t1"),
+        )).copy(isTurnRunning = true, activeTurnId = "t1"))
+        show(state)
+        composeRule.onNodeWithTag("reply-copy-commentary").assertDoesNotExist()
+        composeRule.onNodeWithTag("reply-copy-answer").assertDoesNotExist()
+        var visible = false
+        composeRule.waitUntil(5_000) { composeRule.runOnUiThread {
+            visible = composeRule.activity.window.decorView.descendantTextViews().any { it.text.toString() == "第一句。" }
+        }; visible }
+        composeRule.runOnUiThread { state.value = state.value.copy(timeline = state.value.timeline.map { if (it.id == "answer") it.copy(status = "completed") else it }) }
+        composeRule.onNodeWithTag("reply-copy-answer").assertDoesNotExist()
+        val full = "第一句。第二句完整显示🙂。"
+        composeRule.runOnUiThread { state.value = state.value.copy(isTurnRunning = false, timeline = state.value.timeline.map { if (it.id == "answer") it.copy(body = full) else it }) }
+        composeRule.waitUntil(5_000) { runCatching { composeRule.onNodeWithTag("reply-copy-answer").assertExists() }.isSuccess }
+        composeRule.onNodeWithTag("reply-copy-commentary").assertDoesNotExist()
+        composeRule.runOnUiThread {
+            val text = composeRule.activity.window.decorView.descendantTextViews().single { it.text.toString() == full }.text as android.text.Spanned
+            text.getSpans(0, text.length, com.codex.remote.ui.screens.RevealTextSpan::class.java).forEach {
+                val paint = android.text.TextPaint(); it.updateDrawState(paint); assertEquals(255, paint.alpha)
+            }
+        }
+        composeRule.onNodeWithTag("reply-copy-answer").performClick()
+        composeRule.runOnIdle {
+            val clipboard = composeRule.activity.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            assertEquals("I will read it.\n\n$full", clipboard.primaryClip!!.getItemAt(0).coerceToText(composeRule.activity).toString())
+        }
+    }
+
+    @Test fun openingCommandOutputAndReceivingMoreDoesNotPullTheReaderToTheBottom() {
+        val output = (1..90).joinToString("\n") { "QA command line $it" }
+        val state = mutableStateOf(baseState(timeline = listOf(
+            TimelineItem("q", TimelineKind.USER, body = "Read files", turnId = "t1"),
+            TimelineItem("intro", TimelineKind.AGENT, body = "I will read the files.", status = "completed", turnId = "t1"),
+            TimelineItem("cmd", TimelineKind.COMMAND, title = "QA command", body = output, status = "completed", turnId = "t1"),
+        )).copy(isTurnRunning = true, activeTurnId = "t1"))
+        show(state)
+        composeRule.onNodeWithTag("timeline-tool-cmd").assertIsDisplayed()
+        val before = composeRule.onNodeWithTag("timeline-tool-cmd").fetchSemanticsNode().positionInRoot.y
+        composeRule.onNodeWithTag("timeline-tool-cmd").performClick()
+        composeRule.waitForIdle()
+        assertEquals(before, composeRule.onNodeWithTag("timeline-tool-cmd").fetchSemanticsNode().positionInRoot.y, 3f)
+        composeRule.runOnUiThread { state.value = state.value.copy(timeline = state.value.timeline.map { if (it.id == "cmd") it.copy(body = output + "\nMore output") else it }) }
+        composeRule.waitForIdle()
+        assertEquals(before, composeRule.onNodeWithTag("timeline-tool-cmd").fetchSemanticsNode().positionInRoot.y, 3f)
+        composeRule.onNodeWithTag("conversation-bottom").assertIsNotDisplayed()
+    }
+
+    @Test fun restoredThreadCombinesPretypedInputWithItsExistingDraft() {
+        val state = mutableStateOf(baseState(threads = emptyList()).copy(
+            selectedThreadId = null, selectedProjectPath = null,
+            connectionStatus = ConnectionStatus.CONNECTING,
+        ))
+        val callbacks = WorkspaceCallbacks()
+        val store = LocalStore(composeRule.activity)
+        store.saveDraft(requireNotNull(state.value.activeConnection).id, "restored-thread", "existing draft")
+        show(state, callbacks)
+        composeRule.onNodeWithTag(COMPOSER_INPUT).performTextInput("typed during connection")
+        composeRule.runOnIdle {
+            state.value = state.value.copy(
+                selectedThreadId = "restored-thread", selectedProjectPath = "/workspace/demo",
+                threads = listOf(thread("restored-thread", "Restored thread")),
+                connectionStatus = ConnectionStatus.CONNECTED,
+            )
+        }
+        assertEquals("existing draft\ntyped during connection", composerText())
+        composeRule.onNodeWithTag(COMPOSER_SEND).assertIsEnabled().performClick()
+        composeRule.runOnIdle {
+            assertEquals(listOf("existing draft\ntyped during connection" to false), callbacks.sentMessages)
+        }
     }
 
     @Test
@@ -474,6 +714,175 @@ val answer = 42
         composeRule.onAllNodesWithText("{\"changes\"", substring = true).assertCountEquals(0)
     }
 
+    @Test fun codexTaskListIsAnInnerPageAndBackReturnsToIt() {
+        val state = mutableStateOf(baseState())
+        show(state, startOnTasksPage = true)
+        saveScreenshot("qa-codex-inner-page.png")
+        composeRule.onNodeWithText("PROJECTS").assertIsDisplayed()
+        composeRule.onNodeWithText("Thread A").assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag("conversation-header").assertIsDisplayed()
+        composeRule.onNodeWithContentDescription("Back").performClick()
+        composeRule.onNodeWithText("PROJECTS").assertIsDisplayed()
+        composeRule.onNodeWithText("Thread A").assertIsDisplayed()
+        saveScreenshot("qa-codex-inner-page.png")
+    }
+
+    @Test fun liveDurationPrecedesReasoningAndCompletedDetailsCanExpand() {
+        val state = mutableStateOf(baseState(timeline = listOf(
+            TimelineItem("prompt", TimelineKind.USER, body = "Question", turnId = "t1"),
+            TimelineItem("reasoning", TimelineKind.REASONING, title = "Reasoning", body = "Reported summary", status = "inProgress", turnId = "t1")), isTurnRunning = true)
+            .copy(activeTurnId = "t1", turnStartedAt = android.os.SystemClock.elapsedRealtime()))
+        show(state)
+        val duration = composeRule.onNodeWithTag("reply-duration-reasoning").fetchSemanticsNode().boundsInRoot
+        val reasoning = composeRule.onNodeWithTag("timeline-tool-reasoning").fetchSemanticsNode().boundsInRoot
+        assertTrue(duration.bottom <= reasoning.top)
+        composeRule.runOnIdle { state.value = state.value.copy(isTurnRunning = false, activeTurnId = null,
+            timeline = listOf(state.value.timeline[0], state.value.timeline[1].copy(status = "completed", elapsedMs = 16_000),
+                TimelineItem("final", TimelineKind.AGENT, body = "Answer", status = "completed", turnId = "t1", elapsedMs = 16_000))) }
+        composeRule.onNodeWithTag("reply-duration-final").assertIsDisplayed()
+        composeRule.onAllNodesWithTag("timeline-tool-reasoning").assertCountEquals(0)
+        composeRule.onNodeWithTag("reply-duration-final").performClick()
+        composeRule.onNodeWithTag("timeline-tool-reasoning").assertIsDisplayed()
+    }
+
+    @Test fun expandingCompletedDetailsKeepsTheFullReplyAndExplainsMissingSummary() {
+        val answer = "你好！今天想做点什么？"
+        val state = mutableStateOf(baseState(timeline = listOf(
+            TimelineItem("prompt", TimelineKind.USER, body = "你好啊", turnId = "t1"),
+            TimelineItem("reasoning", TimelineKind.REASONING, title = "Reasoning", status = "completed", turnId = "t1"),
+            TimelineItem("final", TimelineKind.AGENT, body = answer, status = "completed", turnId = "t1", elapsedMs = 3000))))
+        show(state)
+        fun hasFullReply(): Boolean {
+            var found = false
+            composeRule.runOnUiThread { found = composeRule.activity.window.decorView.descendantTextViews().any {
+                it.text.toString() == answer && it.width >= it.paint.measureText(answer) && it.layout != null && it.height >= it.layout.height
+            } }
+            return found
+        }
+        composeRule.waitUntil(5_000) { hasFullReply() }
+        repeat(3) {
+            composeRule.onNodeWithTag("reply-duration-final").performClick()
+            composeRule.onNodeWithTag("timeline-tool-reasoning").performClick()
+            composeRule.onNodeWithTag("timeline-tool-body-reasoning").assertIsDisplayed()
+            composeRule.waitUntil(5_000) { hasFullReply() }
+            composeRule.onNodeWithTag("reply-duration-final").performClick()
+            composeRule.waitUntil(5_000) { hasFullReply() }
+        }
+    }
+
+    @Test fun connectionsUseEachLiveHostStateInsteadOfTheSelectionManager() {
+        val german = SavedConnection(id = "de", name = "德国", host = "example.com", username = "qa", authType = AuthType.PASSWORD)
+        val shenzhen = german.copy(id = "sz", name = "深圳")
+        com.codex.remote.ui.UiText.context = null
+        val live = mutableStateOf(mapOf("de" to ConnectionStatus.CONNECTED, "sz" to ConnectionStatus.CONNECTING))
+        composeRule.setContent { CodexRemoteTheme {
+            com.codex.remote.ui.screens.ConnectionsScreen(
+                AppUiState(savedConnections = listOf(german, shenzhen), activeConnection = german, connectionStatus = ConnectionStatus.CONNECTING),
+                {}, {}, {}, {}, {}, { _, _ -> }, {}, {}, hostStatuses = live.value)
+        } }
+        composeRule.onAllNodesWithTag("host-connecting-de").assertCountEquals(0)
+        composeRule.onNodeWithTag("host-connect-de").assertIsDisplayed()
+        composeRule.onNodeWithTag("host-connecting-sz").assertIsDisplayed()
+        composeRule.runOnIdle { live.value = live.value + ("sz" to ConnectionStatus.CONNECTED) }
+        composeRule.onAllNodesWithTag("host-connecting-sz").assertCountEquals(0)
+        composeRule.onNodeWithTag("host-connect-sz").assertIsDisplayed()
+    }
+
+    @Test fun aFolderWithoutHistoryCanBeOpenedAndUnreadablePathsCannotBeSelected() {
+        val state = mutableStateOf(baseState().copy(projects = emptyList(), threads = emptyList(), selectedProjectPath = null))
+        var selected: RemoteProject? = null
+        val callbacks = WorkspaceCallbacks().apply {
+            onSelectProject = { selected = it }
+            onLoadDirectory = { path -> state.value = state.value.copy(remoteDirectoryPath = path,
+                remoteDirectoryEntries = listOf(com.codex.remote.domain.RemotePathEntry("new-project", true, false)),
+                isRemoteDirectoryLoading = false, remoteDirectoryError = if (path == "/denied") "Permission denied" else null) }
+        }
+        show(state, callbacks, startOnTasksPage = true)
+        composeRule.onNodeWithTag("open-remote-project").performClick()
+        composeRule.onNodeWithTag("remote-project-path").performTextClearance()
+        composeRule.onNodeWithTag("remote-project-path").performTextInput("/denied")
+        composeRule.onNodeWithText("Open folder").performClick()
+        composeRule.onNodeWithTag("select-remote-folder").assertIsNotEnabled()
+        composeRule.onNodeWithTag("remote-project-path").performTextClearance()
+        composeRule.onNodeWithTag("remote-project-path").performTextInput("/srv")
+        composeRule.onNodeWithText("Open folder").performClick()
+        composeRule.onNodeWithText("new-project").performClick()
+        composeRule.onNodeWithTag("select-remote-folder").performClick()
+        assertEquals("/srv/new-project", selected?.path)
+        assertTrue(selected!!.threads.isEmpty())
+    }
+
+    @Test fun switchingExistingProjectsDoesNotBrowseOrCreateFolders() {
+        val first = baseState().projects.single()
+        val second = first.copy(id = "/workspace/other", name = "other", path = "/workspace/other", threads = emptyList())
+        val state = mutableStateOf(baseState().copy(selectedThreadId = null, projects = listOf(first, second)))
+        var browsed = false
+        val callbacks = WorkspaceCallbacks().apply {
+            onLoadDirectory = { browsed = true }
+            onSelectProject = { project -> state.value = state.value.copy(selectedProjectPath = project.path) }
+        }
+        show(state, callbacks)
+        composeRule.onNodeWithTag("new-conversation-project").performClick()
+        composeRule.onNodeWithTag("switch-project-${second.path}").performClick()
+        assertEquals(second.path, state.value.selectedProjectPath)
+        assertFalse(browsed)
+        composeRule.onNodeWithTag("new-conversation-project").performClick()
+        composeRule.onNodeWithTag("switch-project-${first.path}").performClick()
+        assertEquals(first.path, state.value.selectedProjectPath)
+        assertFalse(browsed)
+    }
+
+    @Test fun aNewConversationCanSwitchProjectAndCreateAFolder() {
+        val state = mutableStateOf(baseState().copy(selectedThreadId = null))
+        val callbacks = WorkspaceCallbacks().apply {
+            onLoadDirectory = { path -> state.value = state.value.copy(remoteDirectoryPath = path, remoteDirectoryEntries = emptyList(), remoteDirectoryError = null) }
+            onCreateDirectory = { parent, name ->
+                assertEquals("/workspace/demo", parent)
+                assertEquals("新项目", name)
+                state.value = state.value.copy(remoteDirectoryPath = "$parent/$name")
+            }
+            onSelectProject = { project -> state.value = state.value.copy(projects = listOf(project), selectedProjectPath = project.path) }
+        }
+        show(state, callbacks)
+        composeRule.onNodeWithTag("new-conversation-project").performClick()
+        composeRule.onNodeWithTag("choose-other-project-folder").performClick()
+        composeRule.onNodeWithTag("new-remote-folder").performClick()
+        composeRule.onNodeWithTag("remote-folder-name").performTextInput("../escape")
+        composeRule.onNodeWithTag("create-remote-folder").assertIsNotEnabled()
+        composeRule.onNodeWithTag("remote-folder-name").performTextClearance()
+        composeRule.onNodeWithTag("remote-folder-name").performTextInput("新项目")
+        composeRule.onNodeWithTag("create-remote-folder").performClick()
+        composeRule.onNodeWithTag("select-remote-folder").performClick()
+        composeRule.onNodeWithText("/workspace/demo/新项目").assertIsDisplayed()
+    }
+
+    @Test fun expandedSummaryKeepsLongPressSelectionAndCollapsesOnABodyTap() {
+        val state = mutableStateOf(baseState(timeline = listOf(
+            TimelineItem("prompt", TimelineKind.USER, body = "Question", turnId = "t1"),
+            TimelineItem("reasoning", TimelineKind.REASONING, title = "Reasoning", body = "Reported summary can be selected and copied.", status = "completed", turnId = "t1"),
+            TimelineItem("final", TimelineKind.AGENT, body = "Answer", status = "completed", turnId = "t1", elapsedMs = 3000))))
+        show(state)
+        composeRule.onNodeWithTag("reply-duration-final").performClick()
+        composeRule.onNodeWithTag("timeline-tool-reasoning").performClick()
+        composeRule.onNodeWithTag("timeline-tool-body-reasoning").performTouchInput { longClick(center) }
+        composeRule.onNodeWithTag("timeline-tool-body-reasoning").assertIsDisplayed()
+        // Dismiss the selection toolbar, then tap the body to close it.
+        composeRule.onNodeWithTag("timeline-tool-body-reasoning").performTouchInput { click(center) }
+        composeRule.waitUntil(5_000) { composeRule.onAllNodesWithTag("timeline-tool-body-reasoning").fetchSemanticsNodes().isEmpty() }
+        composeRule.onNodeWithTag("timeline-tool-reasoning").performClick()
+        composeRule.onNodeWithTag("timeline-tool-body-reasoning").assertIsDisplayed()
+        composeRule.onNodeWithTag("timeline-tool-body-reasoning").performTouchInput { click(center) }
+        composeRule.onAllNodesWithTag("timeline-tool-body-reasoning").assertCountEquals(0)
+        composeRule.runOnIdle { state.value = state.value.copy(timeline = state.value.timeline.map { item ->
+            if (item.id == "reasoning") item.copy(body = "A long reported summary that scrolls.\n".repeat(100)) else item
+        }) }
+        composeRule.onNodeWithTag("timeline-tool-reasoning").performClick()
+        composeRule.onNodeWithTag(CONVERSATION_LIST).performTouchInput { swipeUp() }
+        composeRule.onNodeWithTag("timeline-tool-body-reasoning").assertExists()
+        composeRule.onNodeWithTag(CONVERSATION_LIST).performTouchInput { click(center) }
+        composeRule.waitUntil(5_000) { composeRule.onAllNodesWithTag("timeline-tool-body-reasoning").fetchSemanticsNodes().isEmpty() }
+    }
+
     private fun scrollTo(tag: String) {
         composeRule.onNodeWithTag(CONVERSATION_LIST).performScrollToNode(hasTestTag(tag))
         composeRule.onNodeWithTag(tag).assertIsDisplayed()
@@ -482,19 +891,42 @@ val answer = 42
     private fun composerText(): String = composeRule.onNodeWithTag(COMPOSER_INPUT)
         .fetchSemanticsNode().config[SemanticsProperties.EditableText].text
 
+    private fun keyboardVisible() = androidx.core.view.ViewCompat.getRootWindowInsets(composeRule.activity.window.decorView)
+        ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
+
+    private fun saveScreenshot(name: String) {
+        composeRule.waitForIdle()
+        // ponytail: native Popup window exit animations need wall-clock time after Compose is idle.
+        android.os.SystemClock.sleep(350)
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val bitmap = checkNotNull(instrumentation.uiAutomation.takeScreenshot())
+        try {
+            File(checkNotNull(instrumentation.targetContext.getExternalFilesDir(null)), name).outputStream().use {
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, it))
+            }
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
     private fun show(
         state: MutableState<AppUiState>,
         callbacks: WorkspaceCallbacks = WorkspaceCallbacks(),
+        startOnTasksPage: Boolean = false,
     ) {
         // Component-only snapshots keep fallback labels; HomeDeviceTest covers native locales.
         com.codex.remote.ui.UiText.context = null
+        InstrumentationRegistry.getInstrumentation().runOnMainSync {
+            composeRule.activity.window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+        }
         composeRule.setContent {
             CodexRemoteTheme(darkTheme = false) {
                 WorkspaceScreen(
                     state = state.value,
+                    startOnTasksPage = startOnTasksPage,
                     onOpenConnections = {},
                     onNewThread = {},
-                    onSelectProject = {},
+                    onSelectProject = callbacks.onSelectProject,
                     onSelectThread = {},
                     onLoadOlderHistory = callbacks.onLoadOlder,
                     onRenameThread = { _, _ -> },
@@ -518,13 +950,23 @@ val answer = 42
                     onSetGoalStatus = {},
                     onClearGoal = {},
                     onShowStatus = {},
-                    onSetModel = {},
-                    onSetReasoningEffort = {},
-                    onSetServiceTier = {},
+                    onSetModel = {
+                        callbacks.model = it
+                        state.value = state.value.copy(selectedModel = it)
+                    },
+                    onSetReasoningEffort = {
+                        callbacks.reasoningEffort = it
+                        state.value = state.value.copy(selectedReasoningEffort = it)
+                    },
+                    onSetServiceTier = {
+                        callbacks.serviceTier = it
+                        state.value = state.value.copy(selectedServiceTier = it)
+                    },
                     onSetCollaborationMode = { callbacks.collaborationMode = it },
                     onSetPermissionProfile = {},
                     onSetPermissionMode = { callbacks.permissionMode = it },
-                    onLoadRemoteDirectory = {},
+                    onLoadRemoteDirectory = callbacks.onLoadDirectory,
+                    onCreateRemoteDirectory = callbacks.onCreateDirectory,
                     onClearRemoteDirectory = {},
                     onStartLogin = {},
                     onCancelLogin = {},
@@ -608,8 +1050,14 @@ class RemoteStateDeviceTest {
 }
 
 private class WorkspaceCallbacks {
+    var onCreateDirectory: (String, String) -> Unit = { _, _ -> }
+    var onSelectProject: (RemoteProject) -> Unit = {}
+    var onLoadDirectory: (String) -> Unit = {}
     var collaborationMode: String? = null
     var permissionMode: PermissionMode? = null
+    var model: String? = null
+    var reasoningEffort: String? = null
+    var serviceTier: String? = "unchanged"
     val sentMessages = mutableListOf<Pair<String, Boolean>>()
     var olderLoads: Int = 0
     var onLoadOlder: () -> Unit = {}
@@ -644,7 +1092,7 @@ private fun baseState(
         displayName = "GPT-5.6-Sol",
         description = "Device test model",
         isDefault = true,
-        supportedReasoningEfforts = listOf(ReasoningEffortOption("ultra", "Maximum")),
+        supportedReasoningEfforts = listOf(ReasoningEffortOption("low", "Lighter"), ReasoningEffortOption("ultra", "Maximum")),
         defaultReasoningEffort = "ultra",
         inputModalities = setOf("text", "image"),
         serviceTiers = listOf(RemoteServiceTier("fast", "Fast", "Priority processing")),
@@ -713,5 +1161,6 @@ private const val COMPOSER_ADD = "composer-add"
 private const val COMPOSER_PERMISSIONS = "composer-permissions"
 private const val COMPOSER_CONTEXT = "composer-context"
 private const val COMPOSER_MODEL = "composer-model"
+private const val MODEL_MENU = "model-configuration-menu"
 private const val COMPOSER_SEND = "composer-send"
 private const val COMPOSER_GOAL_MARKER = "composer-goal-marker"
