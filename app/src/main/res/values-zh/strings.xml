@@ -377,4 +377,21 @@
     <string name="image_https_only">图片地址必须使用 HTTPS</string>
     <string name="image_empty">未返回任何图片</string>
     <string name="stream_failed">API 流式响应失败</string>
+    <string name="configuration">配置</string>
+    <string name="done">完成</string>
+    <string name="api_provider">API 供应商</string>
+    <string name="api_providers">API 供应商</string>
+    <string name="capabilities_unknown">供应商未报告推理强度选项</string>
+    <string name="retry_send">重试发送</string>
+    <string name="effort_low_detail">响应更快，使用较轻的推理</string>
+    <string name="effort_medium_detail">平衡速度与推理深度</string>
+    <string name="effort_high_detail">为复杂问题进行更深入的推理</string>
+    <string name="effort_xhigh_detail">为困难问题提供额外推理深度</string>
+    <string name="effort_max_detail">最高推理深度</string>
+    <string name="effort_ultra_detail">最高推理深度，支持任务委派</string>
+    <string name="running_seconds">已运行 %1$d 秒</string>
+    <string name="elapsed_seconds">用时 %1$d 秒</string>
+    <string name="remaining_limits">剩余用量</string>
+    <string name="percent_remaining">剩余 %1$d%%</string>
+    <string name="context_remaining">剩余 %1$d%% · 已用 %2$d / %3$d tokens</string>
 </resources>

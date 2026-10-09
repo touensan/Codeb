@@ -365,6 +365,22 @@ enum class ApprovalKind { COMMAND, FILE_CHANGE, PERMISSION, USER_INPUT, UNKNOWN 
 
 enum class PermissionMode { ASK, AUTO_REVIEW, FULL_ACCESS, READ_ONLY }
 
+internal fun AppUiState.withThreadIndex(index: List<RemoteThread>): AppUiState {
+    // A paginated index is not a deletion signal; new threads can appear in it later.
+    val opened = threads.firstOrNull { it.id == selectedThreadId }
+    val refreshed = if (opened != null && index.none { it.id == opened.id }) index + opened else index
+    val projects = groupThreadsByProject(refreshed)
+    return copy(threads = refreshed, projects = projects,
+        selectedProjectPath = selectedProjectPath ?: projects.firstOrNull()?.path)
+}
+
+internal fun AppUiState.withStreamDelta(threadId: String?, id: String, delta: String, kind: TimelineKind): AppUiState {
+    if (threadId == null || selectedThreadId != threadId || id.isBlank() || delta.isEmpty()) return this
+    val existing = timeline.indexOfFirst { it.id == id }
+    return copy(timeline = if (existing < 0) timeline + TimelineItem(id, kind, body = delta, status = "inProgress")
+        else timeline.toMutableList().also { it[existing] = it[existing].copy(body = it[existing].body + delta) })
+}
+
 data class ApprovalQuestion(
     val id: String,
     val header: String,
@@ -385,6 +401,7 @@ data class ApprovalRequest(
 enum class ConnectionStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
 data class AppUiState(
+    val failedSend: FailedSend? = null,
     val savedConnections: List<SavedConnection> = emptyList(),
     val activeConnection: SavedConnection? = null,
     val connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
@@ -439,6 +456,7 @@ data class AppUiState(
     val statusError: String? = null,
     val approvalPolicy: String = "on-request",
     val isTurnRunning: Boolean = false,
+    val turnStartedAt: Long = 0,
     val activeTurnId: String? = null,
     val pendingApproval: ApprovalRequest? = null,
     val pendingHostKeyFingerprint: String? = null,
@@ -449,6 +467,14 @@ data class AppUiState(
     val isBusy: Boolean = false,
     val notice: String? = null,
     val isReadOnlyThread: Boolean = false,
+)
+
+data class FailedSend(
+    val itemId: String,
+    val text: String,
+    val mentions: List<ComposerMention>,
+    val attachments: List<ComposerImageAttachment>,
+    val asGoal: Boolean,
 )
 
 internal fun AppUiState.withThreadRenamed(threadId: String, name: String): AppUiState {
@@ -489,12 +515,26 @@ internal fun mergeTimelineHistory(
 ): List<TimelineItem> {
     val newerById = newer.associateBy(TimelineItem::id)
     val seen = mutableSetOf<String>()
-    return buildList(older.size + newer.size) {
+    val merged = buildList(older.size + newer.size) {
         older.forEach { item ->
             if (seen.add(item.id)) add(newerById[item.id] ?: item)
         }
         newer.forEach { item ->
             if (seen.add(item.id)) add(item)
         }
+    }.toMutableList()
+    val acknowledgedIds = mutableSetOf<String>()
+    // ponytail: scan only optimistic items (usually one); use an ordered body queue
+    // if a large offline send queue ever makes this O(n^2) scan significant.
+    for (index in merged.indices.reversed()) {
+        val local = merged[index]
+        if (!local.id.startsWith("local-") || local.kind != TimelineKind.USER || local.status == "sendFailed") continue
+        val acknowledged = (index + 1 until merged.size).firstOrNull { candidate ->
+            val item = merged[candidate]
+            item.kind == TimelineKind.USER && !item.id.startsWith("local-") && item.id !in acknowledgedIds && item.body == local.body
+        } ?: continue
+        acknowledgedIds += merged[acknowledged].id
+        merged[index] = merged.removeAt(acknowledged)
     }
+    return merged
 }

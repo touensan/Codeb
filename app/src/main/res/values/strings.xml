@@ -377,4 +377,21 @@
     <string name="image_https_only">Image URL must use HTTPS</string>
     <string name="image_empty">No images returned</string>
     <string name="stream_failed">API stream failed</string>
+    <string name="configuration">Configuration</string>
+    <string name="done">Done</string>
+    <string name="api_provider">API provider</string>
+    <string name="api_providers">API providers</string>
+    <string name="capabilities_unknown">Reasoning options not reported by provider</string>
+    <string name="retry_send">Retry message</string>
+    <string name="effort_low_detail">Fast responses with lighter reasoning</string>
+    <string name="effort_medium_detail">Balances speed and reasoning depth</string>
+    <string name="effort_high_detail">Greater reasoning depth for complex problems</string>
+    <string name="effort_xhigh_detail">Extra reasoning depth for difficult problems</string>
+    <string name="effort_max_detail">Maximum reasoning depth</string>
+    <string name="effort_ultra_detail">Maximum reasoning with task delegation</string>
+    <string name="running_seconds">Running %1$d s</string>
+    <string name="elapsed_seconds">Took %1$d s</string>
+    <string name="remaining_limits">Remaining limits</string>
+    <string name="percent_remaining">%1$d%% remaining</string>
+    <string name="context_remaining">%1$d%% remaining · %2$d / %3$d tokens</string>
 </resources>

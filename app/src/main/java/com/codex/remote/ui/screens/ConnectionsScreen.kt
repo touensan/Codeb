@@ -260,7 +260,7 @@ private fun ConnectionRow(
                     }
                 }
                 Text(
-                    "${connection.username}@${connection.host}:${connection.port}",
+                    if (connection.authType == AuthType.PRIVATE_KEY) uiText(R.string.ui_029, "Private key") else uiText(R.string.ui_028, "Password"),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,

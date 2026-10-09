@@ -47,8 +47,10 @@ class LocalStore(context: Context) {
         val thread = state.selectedThreadId ?: return@synchronized
         if (state.timeline.isEmpty() && state.isBusy) return@synchronized
         val old = session(host, thread)
+        val currentIds = state.timeline.mapTo(mutableSetOf(), { it.id })
         write(file(host, thread), RemoteThreadSession.serializer(), RemoteThreadSession(
-            timeline = mergeTimelineHistory(old?.timeline.orEmpty(), state.timeline),
+            // Confirmed live items replace optimistic IDs; do not resurrect them from disk.
+            timeline = mergeTimelineHistory(old?.timeline.orEmpty().filter { !it.id.startsWith("local-") || it.id in currentIds }, state.timeline),
             model = state.selectedModel,
             reasoningEffort = state.selectedReasoningEffort,
             serviceTier = state.selectedServiceTier,

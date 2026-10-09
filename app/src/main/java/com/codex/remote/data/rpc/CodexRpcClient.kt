@@ -718,7 +718,7 @@ class CodexRpcClient(
                     params.string("delta").orEmpty(),
                 ),
             )
-            "item/reasoning/summaryTextDelta", "item/reasoning/textDelta" -> _events.emit(
+            "item/reasoning/summaryTextDelta" -> _events.emit(
                 AppServerEvent.ReasoningDelta(
                     params.string("threadId"),
                     params.string("itemId").orEmpty(),
@@ -1334,7 +1334,7 @@ class CodexRpcClient(
                     id,
                     TimelineKind.REASONING,
                     title = "思考过程",
-                    body = (item.array("summary").ifEmpty { item.array("content") })
+                    body = item.array("summary")
                         .joinToString("\n") { it.jsonPrimitive.contentOrNull.orEmpty() },
                 )
                 "plan" -> TimelineItem(id, TimelineKind.PLAN, title = "计划", body = item.string("text").orEmpty())

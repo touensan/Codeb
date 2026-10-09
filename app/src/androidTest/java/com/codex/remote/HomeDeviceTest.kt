@@ -19,23 +19,26 @@ class HomeDeviceTest {
     }
 
     @Test fun draftSurvivesModeSwitchAndActivityRecreation() {
-        rule.onNodeWithText(label(R.string.ui_250)).performClick()
+        rule.onNodeWithTag("home-mode-chat").performClick()
         rule.onNodeWithContentDescription(label(R.string.ui_259)).performClick()
         val draft = "device-check-${UUID.randomUUID()}"
         rule.onNode(hasSetTextAction()).performTextInput(draft)
-        rule.onNodeWithText(label(R.string.ui_251)).performClick()
-        rule.onNodeWithText(label(R.string.ui_250)).performClick()
+        rule.onNodeWithTag("home-mode-work").performClick()
+        rule.onNodeWithTag("home-mode-chat").performClick()
         rule.waitUntil(5_000) { rule.onAllNodesWithText(draft).fetchSemanticsNodes().isNotEmpty() }
         rule.activityRule.scenario.recreate()
         rule.waitUntil(5_000) { rule.onAllNodesWithText(draft).fetchSemanticsNodes().isNotEmpty() }
-        rule.onNodeWithContentDescription(label(R.string.ui_258)).performClick()
-        rule.waitUntil(5_000) { rule.onAllNodesWithContentDescription(label(R.string.ui_257)).fetchSemanticsNodes().isNotEmpty() }
-        rule.onNodeWithContentDescription(label(R.string.ui_257)).performClick()
+        rule.onNodeWithContentDescription(label(R.string.ui_114)).performClick()
+        rule.onNodeWithText(label(R.string.ui_258)).performClick()
+        rule.waitUntil(5_000) { rule.onAllNodesWithTag("home-mode-work").fetchSemanticsNodes().isNotEmpty() }
+        rule.onNodeWithContentDescription(label(R.string.ui_114)).performClick()
+        rule.onNodeWithText(label(R.string.ui_257)).performClick()
         rule.onNodeWithText(label(R.string.ui_269)).assertIsDisplayed()
     }
 
     @Test fun providerEditorSaveStaysInsideWindowWithKeyboard() {
-        rule.onNodeWithContentDescription(label(R.string.ui_253)).performClick()
+        rule.onNodeWithTag("home-menu").performClick()
+        rule.onNodeWithText(label(R.string.ui_253)).performClick()
         rule.onNodeWithText(label(R.string.ui_261)).performClick()
         rule.onNodeWithText(label(R.string.ui_281)).performClick()
         waitForKeyboard()
@@ -51,12 +54,27 @@ class HomeDeviceTest {
     }
 
     @Test fun sshEditorSaveStaysVisibleWithKeyboard() {
+        rule.onNodeWithTag("home-menu").performClick()
+        rule.onNodeWithText(label(R.string.ui_227)).performClick()
         rule.onNodeWithContentDescription(label(R.string.ui_003)).performClick()
         rule.onNodeWithText(label(R.string.ui_020)).performClick()
         waitForKeyboard()
         rule.waitUntil(5_000) { runCatching { rule.onNodeWithText(label(R.string.ui_038)).assertIsDisplayed() }.isSuccess }
         rule.onNodeWithText(label(R.string.ui_345)).assertIsDisplayed()
         val file = java.io.File(rule.activity.getExternalFilesDir(null), "qa-ssh.png")
+        file.outputStream().use { androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
+    }
+
+    @Test fun sidebarCoversHeaderAndSettingsListsSavedProviders() {
+        rule.onNodeWithTag("home-menu").performClick()
+        rule.onNodeWithText("Codex Remote").assertIsDisplayed()
+        val menu = rule.onNodeWithText("Codex Remote").fetchSemanticsNode().boundsInRoot
+        val modes = rule.onNodeWithTag("home-mode-chat").fetchSemanticsNode().boundsInRoot
+        assertTrue(menu.top < modes.bottom)
+        rule.onNodeWithText(label(R.string.ui_253)).performClick()
+        rule.onNodeWithText(label(R.string.api_providers)).assertIsDisplayed()
+        rule.onNodeWithText(label(R.string.ui_261)).assertIsDisplayed()
+        val file = java.io.File(rule.activity.getExternalFilesDir(null), "qa-settings.png")
         file.outputStream().use { androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot().compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it) }
     }
 }

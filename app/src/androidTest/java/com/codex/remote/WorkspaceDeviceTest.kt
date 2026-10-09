@@ -51,6 +51,9 @@ import com.codex.remote.domain.ThreadGoal
 import com.codex.remote.domain.ThreadGoalStatus
 import com.codex.remote.domain.TimelineItem
 import com.codex.remote.domain.TimelineKind
+import com.codex.remote.domain.withThreadIndex
+import com.codex.remote.domain.withStreamDelta
+import com.codex.remote.domain.FailedSend
 import com.codex.remote.ui.screens.WorkspaceScreen
 import com.codex.remote.ui.theme.CodexRemoteTheme
 import kotlinx.coroutines.flow.first
@@ -81,7 +84,7 @@ class WorkspaceDeviceTest {
 
         composeRule.onAllNodesWithText("Default", substring = true).assertCountEquals(0)
         composeRule.onAllNodesWithText("Plan", substring = true).assertCountEquals(0)
-        composeRule.onNodeWithText("5.6-sol · 极高 · Fast").assertExists()
+        composeRule.onNodeWithText("5.6-sol · Ultra · Fast").assertExists()
         composeRule.onNodeWithTag(COMPOSER_CONTEXT).assertContentDescriptionEquals("上下文已使用 64%")
 
         val add = composeRule.onNodeWithTag(COMPOSER_ADD).fetchSemanticsNode().boundsInRoot
@@ -103,6 +106,38 @@ class WorkspaceDeviceTest {
         composeRule.runOnIdle { assertEquals("plan", callbacks.collaborationMode) }
         composeRule.onAllNodesWithText("Default", substring = true).assertCountEquals(0)
         composeRule.onAllNodesWithText("Plan mode", substring = true).assertCountEquals(0)
+    }
+
+    @Test fun liveReplyAppearsBeforeTurnCompletesAndIndexRefreshKeepsIt() {
+        val state = mutableStateOf(baseState(timeline = listOf(TimelineItem("prompt", TimelineKind.USER, body = "hello")), isTurnRunning = true))
+        show(state)
+        composeRule.runOnIdle {
+            state.value = state.value.withThreadIndex(emptyList()).withStreamDelta("thread-a", "live-reply", "First chunk", TimelineKind.AGENT)
+        }
+        composeRule.waitUntil(5_000) { composeRule.activity.findViewById<View>(android.R.id.content).descendantTextViews().any { it.text.contains("First chunk") } }
+        composeRule.runOnIdle { assertTrue(state.value.isTurnRunning) }
+        composeRule.runOnIdle { state.value = state.value.withStreamDelta("thread-a", "live-reply", " and second chunk", TimelineKind.AGENT) }
+        composeRule.waitUntil(5_000) { composeRule.activity.findViewById<View>(android.R.id.content).descendantTextViews().any { it.text.contains("First chunk and second chunk") } }
+        composeRule.runOnIdle { assertTrue(state.value.isTurnRunning) }
+    }
+
+    @Test fun failedMessageStaysVisibleAndCanBeRetried() {
+        val state = mutableStateOf(baseState(timeline = listOf(TimelineItem("failed", TimelineKind.USER, body = "retry this", status = "sendFailed", title = "QA request failed")))
+            .copy(failedSend = FailedSend("failed", "retry this", emptyList(), emptyList(), false)))
+        val callbacks = WorkspaceCallbacks()
+        show(state, callbacks)
+        composeRule.onNodeWithText("QA request failed").assertIsDisplayed()
+        composeRule.onNodeWithText("Retry message").performClick()
+        composeRule.runOnIdle { assertEquals(listOf("retry this" to false), callbacks.sentMessages) }
+    }
+
+    @Test fun modelSheetHasCheckmarksReasoningAndDone() {
+        val state = mutableStateOf(baseState())
+        show(state)
+        composeRule.onNodeWithTag(COMPOSER_MODEL).performClick()
+        composeRule.onNodeWithText("Configuration").assertIsDisplayed()
+        composeRule.onNodeWithText("GPT-5.6-Sol").assertIsDisplayed()
+        composeRule.onNodeWithText("Done").assertIsDisplayed().performClick()
     }
 
     @Test

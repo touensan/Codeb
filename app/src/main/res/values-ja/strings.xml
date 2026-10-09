@@ -377,4 +377,21 @@
     <string name="image_https_only">画像の URL には HTTPS が必要です</string>
     <string name="image_empty">画像が返されませんでした</string>
     <string name="stream_failed">API のストリーミング応答に失敗しました</string>
+    <string name="configuration">設定</string>
+    <string name="done">完了</string>
+    <string name="api_provider">API プロバイダー</string>
+    <string name="api_providers">API プロバイダー</string>
+    <string name="capabilities_unknown">推論オプションが報告されていません</string>
+    <string name="retry_send">再送信</string>
+    <string name="effort_low_detail">軽い推論で素早く応答</string>
+    <string name="effort_medium_detail">速度と推論の深さのバランス</string>
+    <string name="effort_high_detail">複雑な問題に深い推論</string>
+    <string name="effort_xhigh_detail">難しい問題にさらに深い推論</string>
+    <string name="effort_max_detail">最大の推論の深さ</string>
+    <string name="effort_ultra_detail">最大の推論とタスク委任</string>
+    <string name="running_seconds">実行中 %1$d 秒</string>
+    <string name="elapsed_seconds">所要時間 %1$d 秒</string>
+    <string name="remaining_limits">残りの利用枠</string>
+    <string name="percent_remaining">残り %1$d%%</string>
+    <string name="context_remaining">残り %1$d%% · 使用 %2$d / %3$d トークン</string>
 </resources>

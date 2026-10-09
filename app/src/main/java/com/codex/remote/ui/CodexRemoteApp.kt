@@ -13,7 +13,8 @@ import com.codex.remote.ui.screens.ConnectionsScreen
 import com.codex.remote.ui.screens.WorkspaceScreen
 
 @Composable
-fun RemoteWorkspace(viewModel: AppViewModel, onOpenHosts: () -> Unit) {
+fun RemoteWorkspace(viewModel: AppViewModel, onOpenHosts: () -> Unit,
+    navigation: @Composable () -> Unit = {}, hostSelector: @Composable () -> Unit = {}) {
     val state by viewModel.state.collectAsState()
     val showConnections = state.showConnections || state.activeConnection == null
 
@@ -36,6 +37,8 @@ fun RemoteWorkspace(viewModel: AppViewModel, onOpenHosts: () -> Unit) {
     } else {
         WorkspaceScreen(
             state = state,
+            navigation = navigation,
+            hostSelector = hostSelector,
             onOpenConnections = onOpenHosts,
             onNewThread = viewModel::newThread,
             onSelectProject = viewModel::selectProject,

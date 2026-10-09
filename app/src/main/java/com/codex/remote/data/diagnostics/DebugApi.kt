@@ -7,6 +7,7 @@ import kotlinx.serialization.json.*
 import java.io.File
 import java.io.RandomAccessFile
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.security.MessageDigest
 import java.security.SecureRandom
@@ -32,6 +33,7 @@ object DebugApi {
     fun enable(value: Boolean) {
         require(BuildConfig.DEBUG) { "Diagnostics API is unavailable in release builds" }
         val application = context ?: return
+        if (value && server?.isClosed == false) return
         server?.close()
         server = null
         application.getSharedPreferences("diagnostics", 0).edit().putBoolean("enabled", value).apply()
@@ -40,9 +42,17 @@ object DebugApi {
             File(application.filesDir, "debug-api.token").delete()
             return
         }
+        val listener = ServerSocket()
+        try {
+            listener.reuseAddress = true
+            listener.bind(InetSocketAddress(InetAddress.getByName("127.0.0.1"), PORT), 8)
+        } catch (error: java.io.IOException) {
+            listener.close()
+            record("debug_api_unavailable", error)
+            return
+        }
         token = ByteArray(32).also { SecureRandom().nextBytes(it) }.joinToString("") { "%02x".format(it) }
         LocalStore(application).atomicWrite(File(application.filesDir, "debug-api.token"), token.toByteArray())
-        val listener = ServerSocket(PORT, 8, InetAddress.getByName("127.0.0.1"))
         server = listener
         record("debug_api_started")
         thread(name = "codex-diagnostics", isDaemon = true) {

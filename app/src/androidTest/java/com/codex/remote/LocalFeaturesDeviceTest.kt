@@ -45,6 +45,13 @@ class LocalFeaturesDeviceTest {
         assertEquals(listOf("old", "new"), cache.session("host-a", "same-thread-id")!!.timeline.map { it.id })
         assertEquals("separate", cache.session("host-b", "same-thread-id")!!.timeline.single().body)
         assertNull(cache.session("host-a", "unopened-thread"))
+        val optimistic = TimelineItem("local-prompt", TimelineKind.USER, body = "repeatable request")
+        val acknowledged = optimistic.copy(id = "server-prompt")
+        cache.saveRemote(snapshot("host-a", listOf(optimistic)))
+        cache.saveRemote(snapshot("host-a", listOf(acknowledged)))
+        assertEquals(listOf("old", "new", "server-prompt"), cache.session("host-a", "same-thread-id")!!.timeline.map { it.id })
+        cache.saveRemote(snapshot("host-a", listOf(acknowledged, optimistic.copy(id = "local-next"))))
+        assertEquals(2, cache.session("host-a", "same-thread-id")!!.timeline.count { it.kind == TimelineKind.USER && it.body == optimistic.body })
         cache.saveDraft("host-a", "same-thread-id", "draft")
         assertEquals("draft", LocalStore(context).draft("host-a", "same-thread-id"))
         val cached = LocalConversation(title = "cached", messages = listOf(LocalMessage(role = "user", text = "hello")))
@@ -71,9 +78,14 @@ class LocalFeaturesDeviceTest {
     }
 
     @Test fun debugApiRequiresAuthenticationAndNeverEchoesErrorMessages() {
+        val wasEnabled = app.getSharedPreferences("diagnostics", 0).getBoolean("enabled", false)
         DebugApi.attach(app)
         DebugApi.enable(true)
         try {
+            val token = DebugApi.token
+            DebugApi.attach(app)
+            DebugApi.enable(true)
+            assertEquals(token, DebugApi.token)
             DebugApi.record("self_check", IllegalStateException("secret-api-key-do-not-echo"))
             fun request(path: String, authenticate: Boolean): Pair<Int, String> {
                 return java.net.Socket("127.0.0.1", DebugApi.PORT).use { socket ->
@@ -89,6 +101,6 @@ class LocalFeaturesDeviceTest {
             val logs = request("/logs", true).second
             assertTrue(logs.contains("self_check"))
             assertFalse(logs.contains("secret-api-key-do-not-echo"))
-        } finally { DebugApi.enable(false) }
+        } finally { DebugApi.enable(wasEnabled) }
     }
 }

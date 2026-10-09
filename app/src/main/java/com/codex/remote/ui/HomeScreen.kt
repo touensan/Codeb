@@ -19,6 +19,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.testTag
+import kotlinx.coroutines.launch
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -49,18 +55,22 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CodexRemoteApp(manager: AppViewModel) {
     val managed by manager.state.collectAsState()
     val local: LocalViewModel = viewModel()
     val localState by local.state.collectAsState()
     val context = LocalContext.current
-    var mode by rememberSaveable { mutableStateOf("remote") }
+    var mode by rememberSaveable { mutableStateOf("chat") }
     var settings by remember { mutableStateOf(false) }
     var providerEditor by remember { mutableStateOf(false) }
     var editingProvider by remember { mutableStateOf<ApiProvider?>(null) }
     var allHosts by rememberSaveable { mutableStateOf(false) }
     var pendingThread by remember { mutableStateOf<Pair<String, RemoteThread>?>(null) }
+    val drawer = rememberDrawerState(DrawerValue.Closed)
+    val scope = rememberCoroutineScope()
+    var archived by rememberSaveable { mutableStateOf(false) }
     val hostModels = linkedMapOf<String, AppViewModel>()
     val hostStates = linkedMapOf<String, AppUiState>()
     managed.savedConnections.forEach { saved ->
@@ -95,66 +105,125 @@ fun CodexRemoteApp(manager: AppViewModel) {
         ProviderEditor(editingProvider, localState, local, { providerEditor = false })
         return
     }
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Row(Modifier.weight(1f).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf("chat" to uiText(R.string.ui_250, "Chat"), "work" to uiText(R.string.ui_251, "Work"), "remote" to "Codex", "cloud" to uiText(R.string.ui_252, "Cloud")).forEach { (value, label) ->
-                    FilterChip(selected = mode == value, onClick = { mode = value }, label = { Text(label) }, shape = CircleShape,
-                        enabled = !localState.sending || value != "chat" && value != "work" || value == if (localState.selected?.workspace == true) "work" else "chat")
+    if (settings) {
+        SettingsPage(localState, local, onDismiss = { settings = false }, onEditProvider = { editingProvider = it; providerEditor = true })
+        return
+    }
+    val navigate: (String) -> Unit = { target ->
+        mode = target
+        scope.launch { drawer.close() }
+    }
+    val navigation: @Composable () -> Unit = {
+        NavigationDrawerItem(label = { Text(uiText(R.string.ui_250, "Chat")) }, selected = mode == "chat", icon = { Icon(Icons.Outlined.ChatBubbleOutline, null) }, onClick = { navigate("chat") })
+        NavigationDrawerItem(label = { Text(uiText(R.string.ui_251, "Work")) }, selected = mode == "work", icon = { Icon(Icons.Outlined.WorkOutline, null) }, onClick = { navigate("work") })
+        NavigationDrawerItem(label = { Text("Codex") }, selected = mode == "remote", icon = { Icon(Icons.Outlined.Terminal, null) }, onClick = { navigate("remote") })
+        NavigationDrawerItem(label = { Text(uiText(R.string.ui_252, "Cloud")) }, selected = mode == "cloud", icon = { Icon(Icons.Outlined.CloudQueue, null) }, onClick = { navigate("cloud") })
+        NavigationDrawerItem(label = { Text(uiText(R.string.ui_227, "Connections")) }, selected = false, icon = { Icon(Icons.Outlined.Link, null) }, onClick = { manager.showConnections(true); navigate("remote") })
+        NavigationDrawerItem(label = { Text(uiText(R.string.ui_253, "Settings")) }, selected = false, icon = { Icon(Icons.Outlined.Settings, null) }, onClick = { settings = true; local.refresh(); scope.launch { drawer.close() } })
+    }
+    val connection = managed.activeConnection
+    val host = connection?.let { hostModels[it.id] }
+    if (mode == "remote" && !managed.showConnections && host != null && connection != null && !allHosts) {
+        LaunchedEffect(host, connection.id, managed.connectionMessage) {
+            if (host.state.value.activeConnection == null || managed.connectionMessage.startsWith("reconnect-")) host.connect(connection)
+        }
+        LaunchedEffect(pendingThread, hostStates[connection.id]?.connectionStatus) {
+            val pending = pendingThread
+            if (pending?.first == connection.id && hostStates[connection.id]?.connectionStatus == ConnectionStatus.CONNECTED) {
+                host.selectThread(pending.second)
+                pendingThread = null
+            }
+        }
+        RemoteWorkspace(host, onOpenHosts = { manager.showConnections(true) }, navigation = navigation,
+            hostSelector = {
+                var hostsMenu by remember { mutableStateOf(false) }
+                Box {
+                    TextButton(onClick = { hostsMenu = true }) {
+                        Text("Codex", style = MaterialTheme.typography.titleLarge)
+                        Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(18.dp))
+                    }
+                    DropdownMenu(hostsMenu, { hostsMenu = false }) {
+                        DropdownMenuItem(text = { Text(uiText(R.string.all_hosts, "All")) }, onClick = { allHosts = true; hostsMenu = false })
+                        managed.savedConnections.forEach { saved ->
+                            DropdownMenuItem(text = { Text(saved.name) }, onClick = { if (saved.id != connection.id) manager.connect(saved); hostsMenu = false },
+                                trailingIcon = { if (saved.id == connection.id) Icon(Icons.Outlined.Check, null) })
+                        }
+                        DropdownMenuItem(text = { Text(uiText(R.string.ui_227, "Connections")) }, onClick = { hostsMenu = false; manager.showConnections(true) })
+                    }
+                }
+            })
+        return
+    }
+    ModalNavigationDrawer(drawerState = drawer, drawerContent = {
+        ModalDrawerSheet(modifier = Modifier.widthIn(max = 330.dp).fillMaxHeight(), drawerContainerColor = MaterialTheme.colorScheme.background) {
+            Text("Codex Remote", Modifier.padding(24.dp), style = MaterialTheme.typography.titleLarge)
+            navigation()
+            HorizontalDivider(Modifier.padding(vertical = 12.dp, horizontal = 16.dp))
+            if (mode == "chat" || mode == "work") {
+                Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { archived = !archived }) {
+                        Icon(Icons.Outlined.Archive, null, Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(uiText(R.string.ui_267, "Archived"))
+                        if (archived) Icon(Icons.Outlined.Check, null, Modifier.size(18.dp))
+                    }
+                }
+                LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(16.dp)) {
+                    items(localState.conversations.filter { it.archived == archived }, key = { it.id }) { conversation ->
+                        Row(Modifier.fillMaxWidth().clickable(enabled = !localState.sending) { local.open(conversation); scope.launch { drawer.close() } }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            Text(conversation.title, Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            IconButton(onClick = { local.archive(conversation) }, enabled = !localState.sending) {
+                                Icon(if (archived) Icons.Outlined.Unarchive else Icons.Outlined.Archive, uiText(R.string.ui_072, "Archive"))
+                            }
+                        }
+                    }
                 }
             }
-            IconButton(onClick = { settings = true; local.refresh() }) { Icon(Icons.Outlined.Settings, contentDescription = uiText(R.string.ui_253, "Settings")) }
         }
-        Box(Modifier.weight(1f).consumeWindowInsets(WindowInsets.statusBars)) {
-            when (mode) {
-                "chat", "work" -> LocalPane(local, mode == "work") { provider -> editingProvider = provider; providerEditor = true }
-                "cloud" -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Outlined.CloudQueue, contentDescription = null, modifier = Modifier.size(32.dp))
-                        Spacer(Modifier.height(12.dp))
-                        Text(uiText(R.string.ui_254, "No tasks"), style = MaterialTheme.typography.titleMedium)
-                    }
+    }) {
+        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
+            Box(Modifier.fillMaxWidth().height(72.dp).padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
+                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.align(Alignment.CenterStart)) {
+                    IconButton(onClick = { scope.launch { drawer.open() }; local.refresh() }, modifier = Modifier.testTag("home-menu")) { Icon(Icons.Outlined.Menu, uiText(R.string.ui_255, "Conversations")) }
                 }
-                else -> {
-                    if (managed.showConnections || managed.activeConnection == null) {
-                        ConnectionsScreen(managed, { manager.showConnections(false) }, { manager.editConnection() }, manager::editConnection,
-                            { saved -> hostModels[saved.id]?.disconnect(); manager.deleteConnection(saved) }, manager::connect, manager::saveConnection, manager::closeEditor, manager::clearNotice)
-                    } else {
-                        val connection = managed.activeConnection!!
-                        val host = hostModels[connection.id] ?: return@Box
-                        LaunchedEffect(host, connection.id, managed.connectionMessage) {
-                            if (host.state.value.activeConnection == null || managed.connectionMessage.startsWith("reconnect-")) host.connect(connection)
-                        }
-                        LaunchedEffect(pendingThread, hostStates[connection.id]?.connectionStatus) {
-                            val pending = pendingThread
-                            if (pending?.first == connection.id && hostStates[connection.id]?.connectionStatus == ConnectionStatus.CONNECTED) {
-                                host.selectThread(pending.second)
-                                pendingThread = null
-                            }
-                        }
-                        Column {
-                            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                FilterChip(allHosts, { allHosts = true }, label = { Text(uiText(R.string.all_hosts, "All")) }, shape = CircleShape)
-                                managed.savedConnections.forEach { saved ->
-                                    FilterChip(!allHosts && saved.id == connection.id, { allHosts = false; if (saved.id != connection.id) manager.connect(saved) }, label = { Text(saved.name) }, shape = CircleShape)
-                                }
-                                IconButton(onClick = { manager.showConnections(true) }) { Icon(Icons.Outlined.AddLink, contentDescription = uiText(R.string.ui_227, "Connections")) }
-                            }
-                            Box(Modifier.weight(1f)) {
-                                if (allHosts) HostOverview(managed.savedConnections, hostStates) { saved, thread ->
-                                    allHosts = false
-                                    pendingThread = saved.id to thread
-                                    if (saved.id != connection.id) manager.connect(saved)
-                                }
-                                else RemoteWorkspace(host) { manager.showConnections(true) }
+                if (mode == "chat" || mode == "work") {
+                    Row(Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant).padding(3.dp)) {
+                        listOf("chat" to uiText(R.string.ui_250, "Chat"), "work" to uiText(R.string.ui_251, "Work")).forEach { (value, label) ->
+                            Surface(shape = CircleShape, color = if (mode == value) MaterialTheme.colorScheme.background else androidx.compose.ui.graphics.Color.Transparent) {
+                                TextButton(onClick = { mode = value }, enabled = !localState.sending, modifier = Modifier.width(78.dp).testTag("home-mode-$value")) { Text(label) }
                             }
                         }
                     }
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.align(Alignment.CenterEnd)) {
+                        IconButton(onClick = { local.newConversation() }, enabled = !localState.sending) { Icon(Icons.Outlined.EditNote, uiText(R.string.ui_259, "New chat")) }
+                    }
+                } else Text(if (mode == "remote") "Codex" else uiText(R.string.ui_252, "Cloud"), style = MaterialTheme.typography.titleLarge)
+            }
+            Box(Modifier.weight(1f).consumeWindowInsets(WindowInsets.statusBars)) {
+                when (mode) {
+                    "chat", "work" -> LocalPane(local, mode == "work") { settings = true; local.refresh() }
+                    "cloud" -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Icon(Icons.Outlined.ChatBubbleOutline, null, Modifier.size(32.dp))
+                            Spacer(Modifier.height(12.dp))
+                            Text(uiText(R.string.ui_254, "No tasks"), style = MaterialTheme.typography.titleMedium)
+                        }
+                    }
+                    else -> if (allHosts && connection != null) {
+                        HostOverview(managed.savedConnections, hostStates) { saved, thread ->
+                            allHosts = false
+                            pendingThread = saved.id to thread
+                            if (saved.id != connection.id) manager.connect(saved)
+                        }
+                    } else ConnectionsScreen(managed, { if (managed.activeConnection != null) manager.showConnections(false) else mode = "chat" },
+                        { manager.editConnection() }, manager::editConnection,
+                        { saved -> hostModels[saved.id]?.disconnect(); manager.deleteConnection(saved) }, manager::connect,
+                        manager::saveConnection, manager::closeEditor, manager::clearNotice)
                 }
             }
         }
     }
-    if (settings) SettingsDialog(localState, local, onDismiss = { settings = false }, onAddProvider = { settings = false; editingProvider = null; providerEditor = true })
 }
 
 @Composable
@@ -187,10 +256,9 @@ private fun HostOverview(hosts: List<SavedConnection>, live: Map<String, AppUiSt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, editProvider: (ApiProvider?) -> Unit) {
+private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, openSettings: () -> Unit) {
     val state by viewModel.state.collectAsState()
-    var listOpen by remember { mutableStateOf(false) }
-    var archived by remember { mutableStateOf(false) }
+    var addMenu by remember { mutableStateOf(false) }
     var modelsOpen by remember { mutableStateOf(false) }
     var filesOpen by remember { mutableStateOf(false) }
     var exportFile by remember { mutableStateOf<File?>(null) }
@@ -200,16 +268,8 @@ private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, editProvide
     }
     val provider = state.providers.firstOrNull { it.id == state.providerId }
     Column(Modifier.fillMaxSize().imePadding()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { listOpen = true; viewModel.refresh() }) { Icon(Icons.Outlined.Menu, contentDescription = uiText(R.string.ui_255, "Conversations")) }
-            Text(state.selected?.title ?: if (workspace) uiText(R.string.ui_256, "Workspaces") else uiText(R.string.ui_250, "Chat"), Modifier.weight(1f), style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            if (workspace && state.selected != null) IconButton(onClick = { filesOpen = true }) { Icon(Icons.Outlined.FolderOpen, contentDescription = uiText(R.string.ui_257, "Files")) }
-            if (workspace && state.selected != null) IconButton(onClick = viewModel::generateImage, enabled = !state.sending && state.selected?.draft?.isNotBlank() == true && provider != null) {
-                Icon(Icons.Outlined.Image, contentDescription = uiText(R.string.generate_image, "Generate image"))
-            }
-            if (!workspace && state.selected != null) IconButton(onClick = viewModel::promote, enabled = !state.sending) { Icon(Icons.Outlined.CreateNewFolder, contentDescription = uiText(R.string.ui_258, "Save to workspace")) }
-            IconButton(onClick = { viewModel.newConversation() }, enabled = !state.sending) { Icon(Icons.Outlined.EditNote, contentDescription = uiText(R.string.ui_259, "New chat")) }
-        }
+        if (!state.selected?.messages.isNullOrEmpty()) Text(state.selected?.title.orEmpty(), Modifier.padding(horizontal = 24.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
         state.error?.let { error ->
             Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.Top) {
                 Text(error, Modifier.weight(1f), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -237,57 +297,81 @@ private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, editProvide
                 }
             }
         }
-        Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box {
-                TextButton(onClick = { modelsOpen = true }) {
-                    Text(provider?.let { listOf(it.name, it.selectedModel, it.effort).filter(String::isNotBlank).joinToString(" · ") } ?: uiText(R.string.ui_261, "Add API provider"), modifier = Modifier.widthIn(max = 260.dp), maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Icon(Icons.Outlined.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(18.dp))
-                }
-                DropdownMenu(modelsOpen, { modelsOpen = false }, modifier = Modifier.heightIn(max = 460.dp)) {
-                    state.providers.forEach { candidate -> DropdownMenuItem(text = { Text(candidate.name) }, onClick = { viewModel.provider(candidate.id); modelsOpen = false }, leadingIcon = { Icon(Icons.Outlined.Dns, contentDescription = null) }) }
-                    if (provider != null) {
-                        HorizontalDivider()
-                        DropdownMenuItem(text = { Text(uiText(R.string.ui_067, "Compact context")) }, enabled = !state.sending && provider.protocol == ApiProtocol.RESPONSES && !state.selected?.messages.isNullOrEmpty(), onClick = { viewModel.compact(); modelsOpen = false }, leadingIcon = { Icon(Icons.Outlined.Compress, contentDescription = null) })
-                        provider.models.forEach { model -> DropdownMenuItem(text = { Text(model.id) }, onClick = { viewModel.selectModel(model.id); modelsOpen = false }) }
-                        HorizontalDivider()
-                        DropdownMenuItem(text = { Text(uiText(R.string.ui_262, "Default reasoning")) }, onClick = { viewModel.selectModel(provider.selectedModel); modelsOpen = false })
-                        provider.models.firstOrNull { it.id == provider.selectedModel }?.efforts.orEmpty().forEach { effort ->
-                            DropdownMenuItem(text = { Text(effort) }, onClick = { viewModel.selectModel(provider.selectedModel, effort); modelsOpen = false })
-                        }
-                        DropdownMenuItem(text = { Text(uiText(R.string.ui_263, "Fetch models")) }, onClick = { viewModel.models(provider); modelsOpen = false }, leadingIcon = { Icon(Icons.Outlined.Refresh, contentDescription = null) })
-                        DropdownMenuItem(text = { Text(uiText(R.string.ui_264, "Edit provider")) }, onClick = { modelsOpen = false; editProvider(provider) }, leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) })
+        val draft = state.selected?.draft.orEmpty()
+        if (draft.startsWith("/")) {
+            Surface(shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer) {
+                Column(Modifier.padding(8.dp)) {
+                    if ("/compact".startsWith(draft.trim(), true)) TextButton(onClick = { viewModel.draft(""); viewModel.compact() }, enabled = !state.sending && provider?.protocol == ApiProtocol.RESPONSES) {
+                        Icon(Icons.Outlined.Compress, null); Spacer(Modifier.width(10.dp)); Text(uiText(R.string.ui_067, "Compact context"))
                     }
-                    DropdownMenuItem(text = { Text(uiText(R.string.ui_261, "Add API provider")) }, onClick = { modelsOpen = false; editProvider(null) }, leadingIcon = { Icon(Icons.Outlined.Add, contentDescription = null) })
-                }
-            }
-            if (state.loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-        }
-        Row(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedTextField(
-                value = state.selected?.draft.orEmpty(), onValueChange = viewModel::draft,
-                placeholder = { Text(uiText(R.string.ui_265, "Message")) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(28.dp), maxLines = 6,
-            )
-            FilledIconButton(onClick = if (state.sending) viewModel::stop else viewModel::send, modifier = Modifier.size(48.dp), enabled = state.sending || state.selected?.draft?.isNotBlank() == true && provider != null) {
-                Icon(if (state.sending) Icons.Outlined.Stop else Icons.AutoMirrored.Outlined.Send, contentDescription = if (state.sending) uiText(R.string.ui_266, "Stop") else uiText(R.string.ui_146, "Send"))
-            }
-        }
-    }
-    if (listOpen) ModalBottomSheet(onDismissRequest = { listOpen = false }) {
-        Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(if (workspace) uiText(R.string.ui_256, "Workspaces") else uiText(R.string.ui_255, "Conversations"), Modifier.weight(1f), style = MaterialTheme.typography.titleLarge)
-            FilterChip(archived, { archived = !archived }, label = { Text(uiText(R.string.ui_267, "Archived")) }, shape = CircleShape)
-        }
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 560.dp), contentPadding = PaddingValues(16.dp)) {
-            items(state.conversations.filter { it.archived == archived }, key = { it.id }) { conversation ->
-                Row(Modifier.fillMaxWidth().clickable(enabled = !state.sending) { viewModel.open(conversation); listOpen = false }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(if (workspace) Icons.Outlined.FolderOpen else Icons.Outlined.ChatBubbleOutline, contentDescription = null)
-                    Spacer(Modifier.width(12.dp))
-                    Text(conversation.title, Modifier.weight(1f), maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    IconButton(onClick = { viewModel.archive(conversation) }, enabled = !state.sending) { Icon(if (archived) Icons.Outlined.Unarchive else Icons.Outlined.Archive, contentDescription = if (archived) uiText(R.string.ui_268, "Restore") else uiText(R.string.ui_072, "Archive")) }
+                    if ("/new".startsWith(draft.trim(), true)) TextButton(onClick = { viewModel.newConversation() }, enabled = !state.sending) {
+                        Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(10.dp)); Text(uiText(R.string.ui_259, "New chat"))
+                    }
                 }
             }
         }
+        Surface(shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainer,
+            modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                BasicTextField(value = draft, onValueChange = viewModel::draft, modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp, max = 164.dp).testTag("local-composer"),
+                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface), maxLines = 6,
+                    decorationBox = { field -> Box {
+                        if (draft.isEmpty()) Text(uiText(R.string.ui_265, "Message"), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        field()
+                    } })
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Box {
+                        IconButton(onClick = { addMenu = true }) { Icon(Icons.Outlined.Add, uiText(R.string.ui_114, "Add")) }
+                        DropdownMenu(addMenu, { addMenu = false }) {
+                            if (workspace && state.selected != null) {
+                                DropdownMenuItem(text = { Text(uiText(R.string.ui_257, "Files")) }, leadingIcon = { Icon(Icons.Outlined.FolderOpen, null) },
+                                    onClick = { filesOpen = true; addMenu = false })
+                                DropdownMenuItem(text = { Text(uiText(R.string.generate_image, "Generate image")) }, enabled = !state.sending && draft.isNotBlank() && provider != null,
+                                    leadingIcon = { Icon(Icons.Outlined.Image, null) }, onClick = { viewModel.generateImage(); addMenu = false })
+                                DropdownMenuItem(text = { Text(uiText(R.string.ui_271, "Import file")) }, leadingIcon = { Icon(Icons.Outlined.AttachFile, null) },
+                                    onClick = { importer.launch(arrayOf("*/*")); addMenu = false })
+                            } else if (state.selected != null) DropdownMenuItem(text = { Text(uiText(R.string.ui_258, "Save to workspace")) },
+                                enabled = !state.sending, leadingIcon = { Icon(Icons.Outlined.CreateNewFolder, null) }, onClick = { viewModel.promote(); addMenu = false })
+                            DropdownMenuItem(text = { Text(uiText(R.string.ui_067, "Compact context")) },
+                                enabled = !state.sending && provider?.protocol == ApiProtocol.RESPONSES && !state.selected?.messages.isNullOrEmpty(),
+                                leadingIcon = { Icon(Icons.Outlined.Compress, null) }, onClick = { viewModel.compact(); addMenu = false })
+                        }
+                    }
+                    Spacer(Modifier.weight(1f))
+                    if (state.loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    TextButton(onClick = { if (provider == null) openSettings() else modelsOpen = true }, modifier = Modifier.widthIn(max = 230.dp)) {
+                        Text(provider?.let { listOf(it.selectedModel, it.effort.takeIf(String::isNotBlank)?.displayEffort()).filterNotNull().filter(String::isNotBlank).joinToString(" · ") }
+                            ?: uiText(R.string.ui_261, "Add API provider"), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(16.dp))
+                    }
+                    FilledIconButton(onClick = if (state.sending) viewModel::stop else viewModel::send, modifier = Modifier.size(42.dp),
+                        enabled = state.sending || draft.isNotBlank() && provider != null) {
+                        Icon(if (state.sending) Icons.Outlined.Stop else Icons.Outlined.ArrowUpward,
+                            if (state.sending) uiText(R.string.ui_266, "Stop") else uiText(R.string.ui_146, "Send"))
+                    }
+                }
+            }
+        }
     }
+    if (modelsOpen && provider != null) ModelConfigurationSheet(
+        models = provider.models.map { com.codex.remote.domain.RemoteModel(it.id, it.id, "", false,
+            supportedReasoningEfforts = it.efforts.map { effort -> com.codex.remote.domain.ReasoningEffortOption(effort) }) },
+        selectedModel = provider.selectedModel, effort = provider.effort.takeIf(String::isNotBlank),
+        onModel = { viewModel.selectModel(it) }, onEffort = { viewModel.selectModel(provider.selectedModel, it) },
+        onDismiss = { modelsOpen = false }, providerSelector = {
+            var providersOpen by remember { mutableStateOf(false) }
+            Box(Modifier.padding(horizontal = 24.dp).padding(bottom = 20.dp)) {
+                ConfigurationRow(uiText(R.string.api_provider, "API provider"), provider.name) { providersOpen = true }
+                DropdownMenu(providersOpen, { providersOpen = false }) {
+                    state.providers.forEach { candidate ->
+                        DropdownMenuItem(text = { Text(candidate.name) }, onClick = { viewModel.provider(candidate.id); providersOpen = false },
+                            trailingIcon = { if (candidate.id == provider.id) Icon(Icons.Outlined.Check, null) })
+                    }
+                }
+            }
+        })
     if (filesOpen) AlertDialog(onDismissRequest = { filesOpen = false }, title = { Text(uiText(R.string.ui_269, "Workspace files")) }, text = {
         Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState())) {
             state.files.forEach { file ->
@@ -306,36 +390,69 @@ private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, editProvide
 }
 
 @Composable
-private fun SettingsDialog(state: LocalUiState, local: LocalViewModel, onDismiss: () -> Unit, onAddProvider: () -> Unit) {
+private fun SettingsPage(state: LocalUiState, local: LocalViewModel, onDismiss: () -> Unit, onEditProvider: (ApiProvider?) -> Unit) {
     val context = LocalContext.current
     var confirmClear by remember { mutableStateOf(false) }
     var debugEnabled by remember { mutableStateOf(DebugApi.enabled()) }
     var error by remember { mutableStateOf<String?>(null) }
-    AlertDialog(onDismissRequest = onDismiss, title = { Text(uiText(R.string.ui_253, "Settings")) }, text = {
-        Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(uiText(R.string.ui_273, "System language"), style = MaterialTheme.typography.labelLarge)
-            Text(java.util.Locale.getDefault().getDisplayLanguage(java.util.Locale.getDefault()))
-            HorizontalDivider()
-            TextButton(onClick = onAddProvider) { Icon(Icons.Outlined.AddLink, contentDescription = null); Text(uiText(R.string.ui_261, "Add API provider")) }
-            Text(uiText(R.string.ui_274, "Cache"), style = MaterialTheme.typography.labelLarge)
-            Text(android.text.format.Formatter.formatFileSize(context, state.cacheBytes))
-            TextButton(onClick = { confirmClear = true }, enabled = !state.sending) { Icon(Icons.Outlined.DeleteOutline, contentDescription = null); Text(uiText(R.string.ui_275, "Clear cache")) }
+    BackHandler(onBack = onDismiss)
+    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).windowInsetsPadding(WindowInsets.safeDrawing)) {
+        Box(Modifier.fillMaxWidth().height(72.dp).padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
+            Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.align(Alignment.CenterStart)) {
+                IconButton(onClick = onDismiss) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, uiText(R.string.ui_151, "Close")) }
+            }
+            Text(uiText(R.string.ui_253, "Settings"), style = MaterialTheme.typography.titleLarge)
+        }
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text(uiText(R.string.api_providers, "API providers"), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            state.providers.forEach { provider ->
+                Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.Dns, null)
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f).clickable { local.provider(provider.id) }) {
+                        Text(provider.name, style = MaterialTheme.typography.bodyLarge)
+                        Text(provider.selectedModel, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    if (provider.id == state.providerId) Icon(Icons.Outlined.Check, null, Modifier.size(20.dp))
+                    IconButton(onClick = { local.models(provider) }, enabled = !state.loading) { Icon(Icons.Outlined.Refresh, uiText(R.string.ui_263, "Fetch models")) }
+                    IconButton(onClick = { onEditProvider(provider) }) { Icon(Icons.Outlined.Edit, uiText(R.string.ui_264, "Edit provider")) }
+                }
+            }
+            TextButton(onClick = { onEditProvider(null) }) { Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(10.dp)); Text(uiText(R.string.ui_261, "Add API provider")) }
+            Spacer(Modifier.height(12.dp))
+            Text(uiText(R.string.ui_273, "System language"), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(java.util.Locale.getDefault().getDisplayLanguage(java.util.Locale.getDefault()), Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)).padding(18.dp))
+            Spacer(Modifier.height(12.dp))
+            Text(uiText(R.string.ui_274, "Cache"), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Outlined.Storage, null)
+                Spacer(Modifier.width(14.dp))
+                Text(android.text.format.Formatter.formatFileSize(context, state.cacheBytes), Modifier.weight(1f))
+                TextButton(onClick = { confirmClear = true }, enabled = !state.sending) { Text(uiText(R.string.ui_275, "Clear cache")) }
+            }
             if (BuildConfig.DEBUG) {
-                HorizontalDivider()
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Spacer(Modifier.height(12.dp))
+                Text(uiText(R.string.ui_276, "Debug API"), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Outlined.BugReport, null)
+                    Spacer(Modifier.width(14.dp))
                     Text(uiText(R.string.ui_276, "Debug API"), Modifier.weight(1f))
-                    Switch(debugEnabled, { enabled -> runCatching { DebugApi.enable(enabled) }.onSuccess { debugEnabled = enabled }.onFailure { error = it.message } }, modifier = Modifier.semantics { contentDescription = uiText(R.string.ui_276, "Debug API") })
+                    Switch(debugEnabled, { enabled -> runCatching { DebugApi.enable(enabled) }.onSuccess { debugEnabled = DebugApi.enabled() }.onFailure { error = it.message } },
+                        modifier = Modifier.semantics { contentDescription = uiText(R.string.ui_276, "Debug API") })
                 }
                 if (debugEnabled) TextButton(onClick = {
                     (context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager).setPrimaryClip(ClipData.newPlainText("Debug API token", DebugApi.token))
-                }) { Icon(Icons.Outlined.ContentCopy, contentDescription = null); Text(uiText(R.string.ui_277, "Copy debug token")) }
+                }) { Icon(Icons.Outlined.ContentCopy, null); Spacer(Modifier.width(10.dp)); Text(uiText(R.string.ui_277, "Copy debug token")) }
             }
+            state.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
         }
-    }, confirmButton = { TextButton(onClick = onDismiss) { Text(uiText(R.string.ui_151, "Close")) } })
-    if (confirmClear) AlertDialog(onDismissRequest = { confirmClear = false }, title = { Text(uiText(R.string.ui_278, "Clear cache?")) }, text = { Text(uiText(R.string.ui_279, "Cached remote messages and local chats will be removed. Workspace files, saved hosts and API credentials are kept.")) }, confirmButton = {
-        TextButton(onClick = { local.clearCache(); confirmClear = false }) { Text(uiText(R.string.ui_036, "Clear")) }
-    }, dismissButton = { TextButton(onClick = { confirmClear = false }) { Text(uiText(R.string.ui_037, "Cancel")) } })
+    }
+    if (confirmClear) AlertDialog(onDismissRequest = { confirmClear = false }, title = { Text(uiText(R.string.ui_278, "Clear cache?")) },
+        text = { Text(uiText(R.string.ui_279, "Cached messages will be removed. Workspaces, hosts and API credentials are kept.")) },
+        confirmButton = { TextButton(onClick = { local.clearCache(); confirmClear = false }) { Text(uiText(R.string.ui_036, "Clear")) } },
+        dismissButton = { TextButton(onClick = { confirmClear = false }) { Text(uiText(R.string.ui_037, "Cancel")) } })
 }
 
 @Composable
