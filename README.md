@@ -48,13 +48,10 @@
 独立旧 CLI 的写入锁不会被强行破坏；同步期间自动重试，释放后恢复可写。模型出现在目录中不代表所有接口或推理档位都可用，建议逐项测试。
 Responses 压缩需要上游支持相应端点；Chat Completions 没有通用原生压缩。
 
-## 开源范围
-
-**本仓库只开源 Android APP**：客户端源码、图标、测试及使用文档。
-APP 读取云端公开配置所需的客户端代码属于本仓库；云控后台、管理界面、数据库、部署配置、
-服务器工具箱实现及签名材料不在本仓库中。云端服务不随 APP 一同开源。
-
 ## 本地构建
+
+APP 源码按 [Apache-2.0](LICENSE) 开源，可自行编译安装，使用远程 Codex、日常 API 对话和本机工作等功能。
+用于更新、反馈等辅助功能的云端服务暂未开源，不影响 APP 的编译与主要功能使用。
 
 需要 JDK 17、Android SDK 35：
 
@@ -81,5 +78,5 @@ CODEX_REMOTE_KEY_PASSWORD
 保留上游 Git 历史及 [Apache-2.0 许可证](LICENSE)。历史上游标签不代表白云Codeb 的当前功能。
 这是社区客户端，与 OpenAI 无隶属或官方背书关系；Codex 和 OpenAI 商标归其各自权利人所有。
 
-Codeb is a native Android client for official Codex over SSH and OpenAI-compatible APIs.
-Only the Android application is open source; the cloud administration service is not included.
+Codeb is an open-source native Android client for remote Codex over SSH, on-device Codex through Termux,
+and OpenAI-compatible API conversations. You can build and install the app yourself.
