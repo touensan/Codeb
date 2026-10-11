@@ -1,4 +1,8 @@
 <resources>
+    <string name="theme_title">外観</string>
+    <string name="theme_system">システム</string>
+    <string name="theme_light">ライト</string>
+    <string name="theme_dark">ダーク</string>
     <string name="task_stopped">停止しました。途中の結果は保持されます。</string>
     <string name="stop_disconnected">ローカル実行を停止しました。再接続して続行できます。</string>
     <string name="queue_paused">待機中 · 一時停止</string>

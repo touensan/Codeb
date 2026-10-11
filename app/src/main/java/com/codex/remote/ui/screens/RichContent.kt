@@ -274,7 +274,8 @@ internal class RevealTextView(context: android.content.Context) : android.widget
 }
 
 internal fun previewDocument(source: String, height: Int = 300): String {
-    val style = "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html,body{margin:0}svg,img,video{max-width:100%;height:auto}audio{width:100%}</style>"
+    // ponytail: authored HTML/SVG uses a paper canvas; app dark mode must not invert artwork or hide black SVG labels.
+    val style = "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><style>html{color-scheme:light;background:#fff;color:#171716}html,body{margin:0}svg,img,video{max-width:100%;height:auto}audio{width:100%}</style>"
     val head = Regex("<head\\b[^>]*>", RegexOption.IGNORE_CASE).find(source)
     val responsive = if (head != null) source.replaceRange(head.range.last + 1, head.range.last + 1, style) else style + source
     val escaped = responsive.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "&lt;").replace(">", "&gt;")

@@ -1,4 +1,8 @@
 <resources>
+    <string name="theme_title">Appearance</string>
+    <string name="theme_system">System</string>
+    <string name="theme_light">Light</string>
+    <string name="theme_dark">Dark</string>
     <string name="task_stopped">Stopped. Partial results were kept.</string>
     <string name="stop_disconnected">Stopped the local runtime; reconnect to continue.</string>
     <string name="queue_paused">Queued · paused</string>

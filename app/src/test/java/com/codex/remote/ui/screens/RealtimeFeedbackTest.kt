@@ -110,6 +110,7 @@ class RealtimeFeedbackTest {
         assertTrue(doc.contains("connect-src 'none'"))
         assertTrue(doc.contains("&lt;script&gt;"))
         assertTrue(doc.contains("height:300px"))
+        assertTrue(doc.contains("color-scheme:light;background:#fff;color:#171716"))
         assertFalse(doc.contains("100vh"))
     }
 }

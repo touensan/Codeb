@@ -18,6 +18,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
@@ -38,6 +39,9 @@ import java.util.zip.ZipFile
 @Composable
 fun FileManagerScreen(files: PhoneFiles, initialPath: String, initialFile: String? = null, onClose: () -> Unit) {
     val context=LocalContext.current
+    val editorForeground=MaterialTheme.colorScheme.onSurface.toArgb()
+    val editorBackground=MaterialTheme.colorScheme.surface.toArgb()
+    val editorHighlight=MaterialTheme.colorScheme.secondary.copy(alpha=0.35f).toArgb()
     val scope=rememberCoroutineScope()
     var path by remember(files) { mutableStateOf(initialFile?.let {File(it).parent} ?: initialPath) }
     var pathInput by remember(path) { mutableStateOf(path) }
@@ -139,12 +143,20 @@ fun FileManagerScreen(files: PhoneFiles, initialPath: String, initialFile: Strin
                     TextButton(onClick={back()}){Text(uiText(R.string.file_directory,"Directory"))}
                 }
                 if(editing) AndroidView(factory={ ctx -> EditText(ctx).apply {
-                    contentDescription="Codeb file editor";setText(text);setTextColor(android.graphics.Color.BLACK);setBackgroundColor(android.graphics.Color.WHITE)
+                    contentDescription="Codeb file editor";setText(text)
                     typeface=android.graphics.Typeface.MONOSPACE;textSize=14f;gravity=android.view.Gravity.TOP
                     inputType=InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
                     typeface=android.graphics.Typeface.MONOSPACE;setPadding((16*resources.displayMetrics.density).toInt(),(12*resources.displayMetrics.density).toInt(),(16*resources.displayMetrics.density).toInt(),0)
                     setHorizontallyScrolling(false);isVerticalScrollBarEnabled=true;addTextChangedListener(afterTextChanged={text=it?.toString().orEmpty()})
-                } },modifier=Modifier.weight(1f).fillMaxWidth().testTag("file-editor"))
+                } },update={ editor ->
+                    editor.setTextColor(editorForeground);editor.setBackgroundColor(editorBackground);editor.highlightColor=editorHighlight
+                    if(android.os.Build.VERSION.SDK_INT>=29) {
+                        editor.textCursorDrawable?.setTint(editorForeground)
+                        editor.textSelectHandle?.setTint(editorForeground)
+                        editor.textSelectHandleLeft?.setTint(editorForeground)
+                        editor.textSelectHandleRight?.setTint(editorForeground)
+                    }
+                },modifier=Modifier.weight(1f).fillMaxWidth().testTag("file-editor"))
                 else Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp)) {
                     archive?.let { names -> Text(uiText(R.string.file_archive,"Archive preview (up to 2000 entries)"));names.forEach {Text(it,style=MaterialTheme.typography.bodySmall)} }
                         ?: content?.let { FileContentPreview(current.name,if(dirty)text.toByteArray() else it,if(dirty)text else original) }

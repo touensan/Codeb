@@ -581,6 +581,8 @@ private fun SettingsPage(state: LocalUiState, local: LocalViewModel, onDismiss: 
             }
             TextButton(onClick = { onEditProvider(null) }) { Icon(Icons.Outlined.Add, null); Spacer(Modifier.width(10.dp)); Text(uiText(R.string.ui_261, "Add API provider")) }
             Spacer(Modifier.height(12.dp))
+            AppearanceSetting()
+            Spacer(Modifier.height(12.dp))
             LanguageSetting()
             Spacer(Modifier.height(12.dp))
             Text(uiText(R.string.ui_274, "Cache"), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

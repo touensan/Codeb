@@ -1,4 +1,8 @@
 <resources>
+    <string name="theme_title">外观</string>
+    <string name="theme_system">跟随系统</string>
+    <string name="theme_light">明亮</string>
+    <string name="theme_dark">暗黑</string>
     <string name="task_stopped">已停止，保留已有结果</string>
     <string name="stop_disconnected">已断开本机执行进程以停止任务，重新连接即可继续</string>
     <string name="queue_paused">待执行 · 已暂停</string>

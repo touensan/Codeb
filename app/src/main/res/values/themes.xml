@@ -1,9 +1,11 @@
 <resources>
-    <style name="Theme.CodexRemote" parent="android:style/Theme.Material.Light.NoActionBar">
+    <style name="Base.Theme.CodexRemote" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">#FFFFFF</item>
         <item name="android:statusBarColor">#F7F7F5</item>
         <item name="android:navigationBarColor">#F7F7F5</item>
         <item name="android:windowActionModeOverlay">true</item>
     </style>
+    <style name="Theme.CodexRemote" parent="Base.Theme.CodexRemote" />
 </resources>

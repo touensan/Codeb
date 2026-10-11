@@ -18,6 +18,24 @@ class HomeDeviceTest {
             ?.isVisible(androidx.core.view.WindowInsetsCompat.Type.ime()) == true
     }
 
+    @Test fun appearanceSwitchPersistsAfterActivityRecreation() {
+        val original = com.codex.remote.ui.AppAppearance.selected(rule.activity)
+        rule.onNodeWithTag("home-menu").performClick()
+        rule.onNodeWithText(label(R.string.ui_253)).performClick()
+        try {
+            for (mode in listOf("dark", "light", "system")) {
+                rule.onNodeWithTag("app-theme-$mode").performScrollTo().performClick().assertIsSelected()
+                rule.activityRule.scenario.recreate()
+                rule.onNodeWithTag("app-theme-$mode").performScrollTo().assertIsSelected()
+                rule.onNodeWithTag("app-language").performScrollTo().assertIsDisplayed()
+                java.io.File(rule.activity.getExternalFilesDir(null), "appearance-$mode.png").outputStream().use {
+                    androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+                        .compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                }
+            }
+        } finally { rule.runOnUiThread { com.codex.remote.ui.AppAppearance.select(rule.activity, original) } }
+    }
+
     @Test fun languageCanBeChangedInSettingsAndSurvivesRecreation() {
         val original = com.codex.remote.ui.AppLanguage.selected(rule.activity)
         rule.onNodeWithTag("home-menu").performClick()
@@ -57,8 +75,9 @@ class HomeDeviceTest {
         rule.onNodeWithText(label(R.string.ui_258)).performClick()
         rule.onAllNodesWithTag("home-mode-work").assertCountEquals(0)
         rule.onNodeWithContentDescription(label(R.string.ui_114)).performClick()
-        rule.onNodeWithText(label(R.string.saved_files)).performClick()
-        rule.onNodeWithText(label(R.string.ui_269)).assertIsDisplayed()
+        rule.onNodeWithText(label(R.string.file_manager)).performClick()
+        rule.onNode(isDialog()).assertExists()
+        rule.onNodeWithText(label(R.string.file_manager)).assertIsDisplayed()
     }
 
     @Test fun providerEditorSaveStaysInsideWindowWithKeyboard() {

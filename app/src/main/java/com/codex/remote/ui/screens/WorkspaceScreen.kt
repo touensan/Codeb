@@ -209,9 +209,6 @@ import com.codex.remote.domain.ThreadGoalStatus
 import com.codex.remote.domain.composerToken
 import com.codex.remote.domain.findComposerTrigger
 import com.codex.remote.domain.replaceComposerTrigger
-import com.codex.remote.ui.theme.CodexGreen
-import com.codex.remote.ui.theme.DiffGreen
-import com.codex.remote.ui.theme.DiffRed
 import com.codex.remote.ui.theme.MonoText
 import io.noties.markwon.Markwon
 import io.noties.markwon.ext.latex.JLatexMathPlugin
@@ -1247,7 +1244,7 @@ internal fun HostConnectionDot(status: ConnectionStatus) {
     }
     val modifier = Modifier.semantics { contentDescription = label }
     if (status == ConnectionStatus.CONNECTING) CircularProgressIndicator(modifier.size(14.dp), strokeWidth = 1.5.dp)
-    else Box(modifier.size(7.dp).clip(CircleShape).background(if (status == ConnectionStatus.CONNECTED) Color(0xFF16835D) else MaterialTheme.colorScheme.error))
+    else Box(modifier.size(7.dp).clip(CircleShape).background(if (status == ConnectionStatus.CONNECTED) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.error))
 }
 
 internal data class TimelinePresentationItem(
@@ -1918,7 +1915,7 @@ private fun FileChangesTool(item: TimelineItem, modifier: Modifier, summary: Boo
                     overflow = TextOverflow.Ellipsis,
                 )
                 if (counts.first > 0) {
-                    Text("+${counts.first}", style = MaterialTheme.typography.labelMedium, color = CodexGreen)
+                    Text("+${counts.first}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.secondary)
                     Spacer(Modifier.width(6.dp))
                 }
                 if (counts.second > 0) {
@@ -1994,8 +1991,8 @@ private fun FileChangeBlock(change: FileChangeSummary) {
             ) {
                 change.diff.lineSequence().forEach { line ->
                     val background = when {
-                        line.startsWith("+") && !line.startsWith("+++") -> DiffGreen.copy(alpha = 0.55f)
-                        line.startsWith("-") && !line.startsWith("---") -> DiffRed.copy(alpha = 0.55f)
+                        line.startsWith("+") && !line.startsWith("+++") -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.14f)
+                        line.startsWith("-") && !line.startsWith("---") -> MaterialTheme.colorScheme.error.copy(alpha = 0.14f)
                         else -> Color.Transparent
                     }
                     Text(
@@ -2125,12 +2122,26 @@ internal fun MarkdownBody(text: String, modifier: Modifier = Modifier, streaming
     val context = LocalContext.current
     val density = LocalDensity.current
     val latexTextSize = with(density) { MaterialTheme.typography.bodyLarge.fontSize.toPx() }
-    val markwon = remember(context, latexTextSize) {
+    val colors = MaterialTheme.colorScheme
+    val textColor = colors.onSurface.toArgb()
+    val markwon = remember(context, latexTextSize, colors) {
         Markwon.builder(context)
             .usePlugin(MarkwonInlineParserPlugin.create())
-            .usePlugin(JLatexMathPlugin.create(latexTextSize) { builder -> builder.inlinesEnabled(true) })
+            .usePlugin(JLatexMathPlugin.create(latexTextSize) { builder ->
+                builder.inlinesEnabled(true)
+                builder.theme().textColor(textColor)
+            })
             .usePlugin(StrikethroughPlugin.create())
             .usePlugin(object : io.noties.markwon.AbstractMarkwonPlugin() {
+                override fun configureTheme(builder: io.noties.markwon.core.MarkwonTheme.Builder) {
+                    builder.linkColor(colors.secondary.toArgb()).isLinkUnderlined(true)
+                        .codeTextColor(textColor).codeBlockTextColor(textColor)
+                        .codeBackgroundColor(colors.surfaceContainerHigh.toArgb())
+                        .codeBlockBackgroundColor(colors.surfaceContainerHigh.toArgb())
+                        .blockQuoteColor(colors.outline.toArgb())
+                        .headingBreakColor(colors.outlineVariant.toArgb())
+                        .thematicBreakColor(colors.outlineVariant.toArgb())
+                }
                 override fun configureConfiguration(builder: io.noties.markwon.MarkwonConfiguration.Builder) {
                     builder.linkResolver { view, link ->
                         val uri = Uri.parse(link)
@@ -2142,7 +2153,6 @@ internal fun MarkdownBody(text: String, modifier: Modifier = Modifier, streaming
             })
             .build()
     }
-    val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
     val rendered = remember(text, plainText) { if (plainText) text else normalizeLatexMarkdown(text) }
     val latestRendered by rememberUpdatedState(rendered)
     val latestText by rememberUpdatedState(text)
@@ -2174,6 +2184,8 @@ internal fun MarkdownBody(text: String, modifier: Modifier = Modifier, streaming
         },
         update = { textView ->
             textView.setTextColor(textColor)
+            textView.setLinkTextColor(colors.secondary.toArgb())
+            textView.highlightColor = colors.secondary.copy(alpha = 0.35f).toArgb()
             textView.typeface = if (plainText) android.graphics.Typeface.MONOSPACE else android.graphics.Typeface.DEFAULT
             (staticContent?.let { rendered to it } ?: parsed?.takeIf { it.first == latestRendered })?.let { (source, content) -> textView.setMarkdown(markwon, content, streaming) {
                 if (source == latestRendered) { paintedSource = source; notifyDisplayed(latestText) }

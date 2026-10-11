@@ -5,9 +5,9 @@
 日常模式直接使用兼容 OpenAI 的 API；本机 Codeb 通过 Termux 在手机上运行官方 Codex，也可通过 SSH 使用服务器上的 Codex。
 原生 Android / Kotlin / Jetpack Compose，支持中文、English、日本語。
 
-[下载 0.2.16](https://codeb.baiyun.si/downloads/codeb-0.2.16.apk) · [官网](https://codeb.baiyun.si/) · [Skills 市场](https://codeb.baiyun.si/skills/) · [配置教程](https://api.baiyun.si/docs/codeb/) · [功能与限制](docs/LOCAL_CLIENT.md)
+[下载 0.2.17](https://codeb.baiyun.si/downloads/codeb-0.2.17.apk) · [官网](https://codeb.baiyun.si/) · [Skills 市场](https://codeb.baiyun.si/skills/) · [配置教程](https://api.baiyun.si/docs/codeb/) · [功能与限制](docs/LOCAL_CLIENT.md)
 
-当前源码版本为 **0.2.16（versionCode 20）**。本机运行时的可运行检查见 `node tools/check-local-runtime.cjs`。
+当前源码版本为 **0.2.17（versionCode 21）**。本机运行时的可运行检查见 `node tools/check-local-runtime.cjs`。
 
 [![Android CI](https://github.com/touensan/Codeb/actions/workflows/android.yml/badge.svg)](https://github.com/touensan/Codeb/actions/workflows/android.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -34,6 +34,7 @@
 - **Skills 市场**：浏览、搜索手机适配技能，选择本机或 SSH 环境安装、更新和卸载；保留来源/许可证，校验正文摘要，保护已有技能和本地修改。[浏览市场](https://codeb.baiyun.si/skills/)。
 - **本地保存**：聊天、草稿和已读取的远程历史保存在手机；手动清理缓存保留工作空间、主机和 API 配置。
 - **语言切换**：打开侧栏 → 设置 → 显示语言，可选择跟随系统、中文、English、日本語，立即生效并保存选择。
+- **明暗外观**：打开侧栏 → 设置 → 外观，可选择跟随系统、明亮或暗黑，立即生效并保存选择；文字、图标、文件编辑器、Markdown、公式和代码差异随主题适配。
 - **关于与更新**：显示实际安装版本、检查更新、打开配置教程与反馈交流群；添加 API 时可查看推荐供应商和兼容性说明，客户端离线保留有效配置缓存。
 
 远程连接只需 SSH 和服务器上原装的官方 Codex，不要求安装第三方桥接、Hub、包装器或额外常驻服务。
@@ -41,7 +42,7 @@
 
 ## 安装与升级
 
-当前正式安装包为 [0.2.16](https://codeb.baiyun.si/downloads/codeb-0.2.16.apk)，可用同路径的 [.sha256](https://codeb.baiyun.si/downloads/codeb-0.2.16.apk.sha256) 校验。[GitHub 下载](https://github.com/touensan/Codeb/releases/latest) 提供同一正式安装包，包含 Codeb 的更新、教程、反馈和 Skills 市场入口。Android 8.0 及以上；本机工作模式需要 ARM64 Android 和 Termux。
+当前正式安装包为 [0.2.17](https://codeb.baiyun.si/downloads/codeb-0.2.17.apk)，可用同路径的 [.sha256](https://codeb.baiyun.si/downloads/codeb-0.2.17.apk.sha256) 校验。[GitHub 下载](https://github.com/touensan/Codeb/releases/latest) 提供同一正式安装包，包含 Codeb 的更新、教程、反馈和 Skills 市场入口。Android 8.0 及以上；本机工作模式需要 ARM64 Android 和 Termux。
 正式包关闭调试模式和调试 API，不带 `dev` 版本后缀。
 
 为让已有白云Codeb 用户覆盖升级并保留聊天、SSH 和 API 配置，正式版沿用原安装包名

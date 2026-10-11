@@ -468,7 +468,8 @@ val answer = 42
         val spans = rendered.getSpans(0, rendered.length, Any::class.java)
         assertFalse(plainText.contains("**"))
         assertFalse(plainText.contains("```"))
-        assertTrue(plainText.contains("val answer = 42"))
+        // Code fences are now rendered in a separate source/preview card.
+        composeRule.onNodeWithText("val answer = 42", substring = true).assertIsDisplayed()
         assertTrue(spans.any { span ->
             (span is StyleSpan && span.style and Typeface.BOLD != 0) ||
                 span.javaClass.name.contains("StrongEmphasis", ignoreCase = true)
@@ -710,7 +711,8 @@ val answer = 42
                 FileChangeSummary("app/src/Status.kt", "add", "--- /dev/null\n+++ b/app/src/Status.kt\n+val ready = true"),
             ),
         )
-        show(mutableStateOf(baseState(timeline = listOf(files))))
+        val darkTheme = mutableStateOf(false)
+        show(mutableStateOf(baseState(timeline = listOf(files))), darkTheme = darkTheme)
 
         composeRule.onNodeWithText("已编辑 2 个文件").assertIsDisplayed()
         composeRule.onNodeWithText("--- a/app/src/Main.kt").assertDoesNotExist()
@@ -722,6 +724,12 @@ val answer = 42
         composeRule.onNodeWithText("+2  -1").assertExists()
         composeRule.onAllNodesWithText("Changes").assertCountEquals(0)
         composeRule.onAllNodesWithText("{\"changes\"", substring = true).assertCountEquals(0)
+        for (dark in listOf(false, true)) {
+            composeRule.runOnIdle { darkTheme.value = dark }
+            composeRule.onNodeWithText("+new").assertIsDisplayed()
+            composeRule.onNodeWithText("-old").assertIsDisplayed()
+            saveScreenshot("appearance-diff-$dark.png")
+        }
     }
 
     @Test fun codexTaskListIsAnInnerPageAndBackReturnsToIt() {
@@ -1024,6 +1032,7 @@ val answer = 42
         state: MutableState<AppUiState>,
         callbacks: WorkspaceCallbacks = WorkspaceCallbacks(),
         startOnTasksPage: Boolean = false,
+        darkTheme: MutableState<Boolean> = mutableStateOf(false),
     ) {
         // Component-only snapshots keep fallback labels; HomeDeviceTest covers native locales.
         com.codex.remote.ui.UiText.context = null
@@ -1031,7 +1040,7 @@ val answer = 42
             composeRule.activity.window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         }
         composeRule.setContent {
-            CodexRemoteTheme(darkTheme = false) {
+            CodexRemoteTheme(darkTheme = darkTheme.value) {
                 WorkspaceScreen(
                     state = state.value,
                     startOnTasksPage = startOnTasksPage,
