@@ -52,7 +52,6 @@ Responses 压缩需要上游支持相应端点；Chat Completions 没有通用�
 ## 本地构建
 
 APP 源码按 [Apache-2.0](LICENSE) 开源，可自行编译安装，使用远程 Codex、日常 API 对话和本机工作等功能。
-用于更新、反馈等辅助功能的云端服务暂未开源，不影响 APP 的编译与主要功能使用。
 
 需要 JDK 17、Android SDK 35：
 
