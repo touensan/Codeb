@@ -21,7 +21,10 @@ class SshConfigTest {
             "exec \"\${SHELL:-/bin/sh}\" -lc 'codex --version'",
             codexVersionCommand(RemotePlatform.POSIX),
         )
-        assertTrue(appServerCommand(RemotePlatform.POSIX).contains("-lc 'exec codex app-server"))
+        val command=appServerCommand(RemotePlatform.POSIX)
+        assertTrue(command.contains("-lc 'if codex app-server proxy --help"))
+        assertTrue(command.contains("daemon start >&2 && { echo CODEB_WS_V1; exec codex app-server proxy"))
+        assertFalse(command.contains("daemon restart"))
     }
 
     @Test

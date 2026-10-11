@@ -19,7 +19,7 @@ import com.codex.remote.R
 import com.codex.remote.data.api.CloudUpdate
 import com.codex.remote.data.api.safeCloudLink
 
-private fun openCloudLink(context: android.content.Context, url: String) {
+internal fun openCloudLink(context: android.content.Context, url: String) {
     if (safeCloudLink(url)) runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
         .onFailure { android.widget.Toast.makeText(context, it.localizedMessage, android.widget.Toast.LENGTH_SHORT).show() }
 }
@@ -28,6 +28,9 @@ private fun openCloudLink(context: android.content.Context, url: String) {
 internal fun CloudSettings(state: LocalUiState, local: LocalViewModel) {
     val context = LocalContext.current
     var about by remember { mutableStateOf(false) }
+    TextButton(onClick = { openCloudLink(context, "https://codeb.baiyun.si/feedback/") }, modifier = Modifier.fillMaxWidth().testTag("open-feedback-group")) {
+        Text(uiText(R.string.feedback_group, "Feedback community"), Modifier.weight(1f))
+    }
     if (state.cloud.recommendationsEnabled && state.cloud.recommendations.isNotEmpty()) {
         Text(uiText(R.string.cloud_recommendations, "Recommended"), style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag("cloud-recommendations"))
         state.cloud.recommendations.forEach { item ->
@@ -54,7 +57,7 @@ internal fun CloudSettings(state: LocalUiState, local: LocalViewModel) {
             if (state.cloud.about.description.isNotBlank()) Text(state.cloud.about.description)
             Text("Apache-2.0 · Codex Remote", style = MaterialTheme.typography.bodySmall)
             if (state.cloud.about.website.isNotBlank()) TextButton(onClick = { openCloudLink(context, state.cloud.about.website) }) { Text(uiText(R.string.cloud_website, "Website")) }
-            TextButton(onClick = { openCloudLink(context, "https://github.com/touensan/codex-remote-android") }) { Text(uiText(R.string.cloud_source, "Source and licenses")) }
+            TextButton(onClick = { openCloudLink(context, "https://github.com/touensan/Codeb") }) { Text(uiText(R.string.cloud_source, "Source and licenses")) }
             HorizontalDivider()
             Button(onClick = { local.refreshCloud(force = true) }, enabled = !state.checkingCloud, modifier = Modifier.testTag("check-updates")) {
                 if (state.checkingCloud) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)

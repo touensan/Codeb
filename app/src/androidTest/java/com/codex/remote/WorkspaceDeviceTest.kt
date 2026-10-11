@@ -145,6 +145,16 @@ class WorkspaceDeviceTest {
         composeRule.runOnIdle { assertTrue(state.value.isTurnRunning) }
     }
 
+    @Test fun runningTaskAndProjectRemainVisibleAfterIndexRefresh() {
+        val state = mutableStateOf(baseState(isTurnRunning = true).withThreadIndex(listOf(thread("thread-a", "Thread A"))))
+        show(state, startOnTasksPage = true)
+        composeRule.onNodeWithTag("thread-running-thread-a").assertIsDisplayed()
+        composeRule.onNodeWithTag("project-running-/workspace/demo").assertIsDisplayed()
+        composeRule.runOnIdle { state.value = state.value.copy(isTurnRunning = false).withThreadIndex(listOf(thread("thread-a", "Thread A"))) }
+        composeRule.onAllNodesWithTag("thread-running-thread-a").assertCountEquals(0)
+        composeRule.onAllNodesWithTag("project-running-/workspace/demo").assertCountEquals(0)
+    }
+
     @Test fun failedMessageStaysVisibleAndCanBeRetried() {
         val state = mutableStateOf(baseState(timeline = listOf(TimelineItem("failed", TimelineKind.USER, body = "retry this", status = "sendFailed", title = "QA request failed")))
             .copy(failedSend = FailedSend("failed", "retry this", emptyList(), emptyList(), false)))
@@ -883,6 +893,39 @@ val answer = 42
         composeRule.waitUntil(5_000) { composeRule.onAllNodesWithTag("timeline-tool-body-reasoning").fetchSemanticsNodes().isEmpty() }
     }
 
+    @Test fun runningDraftActionsAndQueuedCardHaveSeparateTargets() {
+        val state=mutableStateOf(baseState().copy(isTurnRunning=true,activeTurnId="t1"))
+        val callbacks=WorkspaceCallbacks()
+        callbacks.onQueue={text,_,_->state.value=state.value.copy(queueMessages=listOf("q1" to text))}
+        show(state,callbacks)
+        composeRule.onAllNodesWithTag("send-queue").assertCountEquals(0)
+        composeRule.onAllNodesWithTag("send-steer").assertCountEquals(0)
+        composeRule.onNodeWithTag(COMPOSER_INPUT).performTextInput("Queued correction")
+        composeRule.onNodeWithTag("send-queue").assertIsSelected()
+        composeRule.onNodeWithTag(COMPOSER_SEND).performClick()
+        composeRule.onAllNodesWithTag("send-queue").assertCountEquals(0)
+        composeRule.onNodeWithTag("queued-q1").assertIsDisplayed()
+        assertTrue(composeRule.onNodeWithTag("queued-q1").fetchSemanticsNode().boundsInRoot.bottom <= composeRule.onNodeWithTag(COMPOSER_INPUT).fetchSemanticsNode().boundsInRoot.top)
+        composeRule.onNodeWithTag("steer-queued-q1").performClick()
+        assertEquals("q1",callbacks.steeredQueue)
+        assertTrue(callbacks.sentMessages.isEmpty())
+    }
+
+    @Test fun activeToolDetailsOnlyExpandAfterManualTap() {
+        val state=mutableStateOf(baseState().copy(isTurnRunning=true,activeTurnId="t1",timeline=listOf(
+            TimelineItem("prompt",TimelineKind.USER,body="Work",turnId="t1"),
+            TimelineItem("command",TimelineKind.COMMAND,title="bash",body="SECRET_DETAIL",status="inProgress",turnId="t1")
+        )))
+        show(state)
+        composeRule.onAllNodesWithTag("timeline-tool-body-command").assertCountEquals(0)
+        composeRule.runOnIdle {state.value=state.value.copy(timeline=state.value.timeline.map {if(it.id=="command")it.copy(body="MORE_DETAIL")else it})}
+        composeRule.onAllNodesWithTag("timeline-tool-body-command").assertCountEquals(0)
+        composeRule.onNodeWithTag("reply-duration-command").performClick()
+        composeRule.onAllNodesWithTag("timeline-tool-body-command").assertCountEquals(0)
+        composeRule.onNodeWithTag("timeline-tool-command").performClick()
+        composeRule.onNodeWithTag("timeline-tool-body-command").assertIsDisplayed()
+    }
+
     private fun scrollTo(tag: String) {
         composeRule.onNodeWithTag(CONVERSATION_LIST).performScrollToNode(hasTestTag(tag))
         composeRule.onNodeWithTag(tag).assertIsDisplayed()
@@ -936,6 +979,8 @@ val answer = 42
                     onDeleteArchivedThread = {},
                     onSetThreadPinned = { _, _ -> },
                     onSend = callbacks.onSend,
+                    onQueue = callbacks.onQueue,
+                    onSteerQueued = {callbacks.steeredQueue=it},
                     onStop = {},
                     onCompactThread = {},
                     onForkThread = {},
@@ -1050,6 +1095,8 @@ class RemoteStateDeviceTest {
 }
 
 private class WorkspaceCallbacks {
+    var onQueue: (String,List<ComposerMention>,List<ComposerImageAttachment>) -> Unit = {_,_,_->}
+    var steeredQueue:String?=null
     var onCreateDirectory: (String, String) -> Unit = { _, _ -> }
     var onSelectProject: (RemoteProject) -> Unit = {}
     var onLoadDirectory: (String) -> Unit = {}

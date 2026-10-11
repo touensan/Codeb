@@ -102,6 +102,25 @@ sealed interface AppServerEvent {
 }
 
 class RpcException(message: String, val code: Int? = null) : Exception(message)
+class QueuedSteerUncertain(val originalText:String, cause:Exception):Exception("Could not confirm steering. Check the conversation before sending this message again.",cause)
+
+internal fun localRuntimeParams(method: String, params: JsonObject): JsonObject {
+    if (method !in setOf("thread/start", "thread/resume", "thread/fork", "turn/start")) return params
+    return JsonObject(params.toMutableMap().apply {
+        // Android UID/KSU defines access here; Linux bwrap is unavailable on Android.
+        // A Termux UID already authorized for su is not a root-proof sandbox.
+        remove("permissions")
+        put("approvalPolicy", JsonPrimitive("on-request"))
+        put("approvalsReviewer", JsonPrimitive("user"))
+        if (method == "turn/start") put("sandboxPolicy", buildJsonObject { put("type", "dangerFullAccess") })
+        else put("sandbox", JsonPrimitive("danger-full-access"))
+        if (method == "thread/start") put("developerInstructions", JsonPrimitive(
+            "You are running on an Android phone through Codeb. Work only on files requested by the user. " +
+            "Use the current process identity. Never invoke su, sudo, or change Android security policy to elevate privileges; " +
+            "ask the user to choose Codeb's Root mode when an operation needs root. Never expose credentials."
+        ))
+    })
+}
 
 internal fun remoteDirectoryChildPath(parent: String, name: String): String {
     val windows = parent.getOrNull(1) == ':' || parent.startsWith("\\\\")
@@ -115,8 +134,10 @@ internal fun remoteDirectoryChildPath(parent: String, name: String): String {
 }
 
 class CodexRpcClient(
-    private val transport: ActiveSshTransport,
+    private val transport: AppServerTransport,
+    private val phoneTool: (suspend (JsonObject) -> JsonObject)? = null,
 ) : Closeable {
+    val sshFiles get() = transport as? ActiveSshTransport
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
     private val requestId = AtomicLong(1)
     private val pending = ConcurrentHashMap<String, CompletableDeferred<JsonObject>>()
@@ -126,7 +147,30 @@ class CodexRpcClient(
     val events: SharedFlow<AppServerEvent> = _events
     private var readerJob: Job? = null
 
-    suspend fun readArtifact(path: String, root: String): ByteArray = transport.readArtifact(path, root)
+    suspend fun readArtifact(path: String, root: String): ByteArray {
+        if (transport is ActiveSshTransport) return transport.readArtifact(path, root)
+        val base = java.nio.file.Paths.get(root).normalize()
+        val absolute = base.resolve(path).normalize()
+        require(absolute.startsWith(base) && absolute != base && '\u0000' !in path)
+        // Resolve the open descriptor, not a path checked before open (symlink races).
+        val script = """
+            const fs=require('fs'),p=require('path');
+            const base=fs.realpathSync(process.argv[1]),fd=fs.openSync(process.argv[2],'r');
+            const target=fs.realpathSync('/proc/self/fd/'+fd),stat=fs.fstatSync(fd),limit=18*1024*1024;
+            if(!target.startsWith(base.endsWith(p.sep)?base:base+p.sep)||!stat.isFile()||stat.size>limit)process.exit(2);
+            const data=Buffer.alloc(stat.size);let offset=0;
+            while(offset<data.length){const n=fs.readSync(fd,data,offset,data.length-offset,null);if(!n)process.exit(3);offset+=n;}
+            process.stdout.write(data.toString('base64'));
+        """.trimIndent()
+        val result = request("command/exec", buildJsonObject {
+            put("command", buildJsonArray { add(JsonPrimitive("/data/data/com.termux/files/usr/bin/node")); add(JsonPrimitive("-e")); add(JsonPrimitive(script)); add(JsonPrimitive(root)); add(JsonPrimitive(absolute.toString())) })
+            put("cwd", root); put("sandboxPolicy", buildJsonObject { put("type", "dangerFullAccess") }); put("outputBytesCap", 25 * 1024 * 1024)
+        })
+        check(result["exitCode"]?.jsonPrimitive?.longOrNull == 0L) { "File must be inside the workspace and at most 18 MB" }
+        val value = result.string("stdout") ?: error("File unavailable")
+        require(value.length <= 24 * 1024 * 1024) { "Local preview is limited to 18 MB" }
+        return java.util.Base64.getDecoder().decode(value)
+    }
 
     suspend fun initialize(): RemoteServerInfo {
         readerJob = scope.launch { readLoop() }
@@ -594,11 +638,70 @@ class CodexRpcClient(
         )
     }
 
+    suspend fun queueMessage(threadId: String, text: String, mentions: List<ComposerMention>, attachments: List<ComposerImageAttachment>) {
+        request("thread/queue/add", buildJsonObject {
+            put("threadId", threadId); put("clientUserMessageId", java.util.UUID.randomUUID().toString())
+            put("input", userInputs(text, mentions, attachments))
+        })
+    }
+
+    suspend fun queuedMessages(threadId: String): List<Pair<String, String>> {
+        val result = request("thread/queue/list", buildJsonObject { put("threadId", threadId); put("limit", 100) })
+        return result.array("data").mapNotNull { value -> value.asObject()?.let { item ->
+            item.string("id")?.let { id -> id to item.array("input").mapNotNull { it.asObject()?.string("text") }.joinToString("\n") }
+        } }
+    }
+
+    suspend fun deleteQueuedMessage(threadId: String, id: String) {
+        request("thread/queue/delete", buildJsonObject { put("threadId", threadId); put("queuedSubmissionId", id) })
+    }
+
+    suspend fun steerQueuedMessage(threadId: String, id: String) {
+        val queued = request("thread/queue/list", buildJsonObject { put("threadId",threadId);put("limit",100) })
+            .array("data").mapNotNull { it.asObject() }.firstOrNull { it.string("id")==id }
+            ?: throw RpcException("This message has already left the queue; refresh the conversation.")
+        val thread = request("thread/read",buildJsonObject {put("threadId",threadId);put("includeTurns",true)}).obj("thread")
+        val turn = thread?.array("turns")?.mapNotNull {it.asObject()}?.lastOrNull {it.string("status")=="inProgress"}?.string("id")
+        if(turn==null) {
+            request("thread/queue/start",buildJsonObject {put("threadId",threadId);put("queuedSubmissionId",id)})
+            return
+        }
+        require(queued.array("input").all {it.asObject()?.string("type")=="text"}) {"Messages with attachments must remain queued."}
+        // Claim the queued input first; false means the daemon already consumed it.
+        val deleted=request("thread/queue/delete",buildJsonObject {put("threadId",threadId);put("queuedSubmissionId",id)})
+        if(deleted["deleted"]?.jsonPrimitive?.content!="true") throw RpcException("This message is already being processed.")
+        try {
+            request("turn/steer",buildJsonObject {put("threadId",threadId);put("expectedTurnId",turn);put("input",queued.array("input"))})
+        } catch(error: Exception) {
+            // A definite server rejection is safe to requeue; an unknown transport outcome is not.
+            if(error is RpcException && error.code!=null) {
+                val restored=runCatching {request("thread/queue/add",buildJsonObject {
+                    put("threadId",threadId);put("clientUserMessageId",queued.string("clientUserMessageId") ?: java.util.UUID.randomUUID().toString());put("input",queued.array("input"))
+                })}.isSuccess
+                if(restored)throw error
+            }
+            throw QueuedSteerUncertain(queued.array("input").joinToString("\n"){it.asObject()?.string("text").orEmpty()},error)
+        }
+    }
+
     suspend fun interruptTurn(threadId: String, turnId: String) {
         request("turn/interrupt", buildJsonObject {
             put("threadId", threadId)
             put("turnId", turnId)
         })
+    }
+
+    suspend fun interruptActiveTurn(threadId: String, hint: String? = null): String? {
+        if (hint != null) {
+            try { kotlinx.coroutines.withTimeout(5_000) { interruptTurn(threadId, hint) }; return hint }
+            catch (error: RpcException) { /* The optimistic turn id may be stale; read the actual active turn. */ }
+        }
+        val thread = request("thread/read", buildJsonObject { put("threadId", threadId); put("includeTurns", true) }).obj("thread")
+        val turn = thread?.array("turns")?.mapNotNull { it.asObject() }?.lastOrNull {
+            it.string("status") in listOf("inProgress", "in_progress", "running")
+        }?.string("id") ?: return null
+        interruptTurn(threadId, turn)
+        return turn
     }
 
     suspend fun respondToApproval(
@@ -640,7 +743,9 @@ class CodexRpcClient(
             send(buildJsonObject {
                 put("method", method)
                 put("id", id.toLong())
-                put("params", params)
+                val localParams = if (transport.local) localRuntimeParams(method, params) else params
+                put("params", if (transport.local && method == "thread/start" && phoneTool != null)
+                    JsonObject(localParams + ("dynamicTools" to buildJsonArray { add(com.codex.remote.data.local.PhoneControl.tool) })) else localParams)
             })
             return deferred.await()
         } finally {
@@ -653,8 +758,8 @@ class CodexRpcClient(
         put("params", params)
     })
 
-    private suspend fun respond(id: String, result: JsonObject) = send(buildJsonObject {
-        id.toLongOrNull()?.let { put("id", it) } ?: put("id", id)
+    private suspend fun respond(id: String, result: JsonObject, originalId: JsonElement? = null) = send(buildJsonObject {
+        put("id",originalId ?: id.toLongOrNull()?.let(::JsonPrimitive) ?: JsonPrimitive(id))
         put("result", result)
     })
 
@@ -694,7 +799,7 @@ class CodexRpcClient(
                 }
                 val method = message.string("method") ?: continue
                 val params = message.obj("params") ?: buildJsonObject {}
-                if (id != null) handleServerRequest(id, method, params) else handleNotification(method, params)
+                if (id != null) handleServerRequest(id, method, params, message["id"]!!) else handleNotification(method, params)
             }
             _events.emit(AppServerEvent.ConnectionLost)
         } catch (cancelled: CancellationException) {
@@ -843,7 +948,17 @@ class CodexRpcClient(
         }
     }
 
-    private suspend fun handleServerRequest(id: String, method: String, params: JsonObject) {
+    private suspend fun handleServerRequest(id: String, method: String, params: JsonObject, originalId: JsonElement) {
+        if (transport.local && method == "item/tool/call" && params.string("tool") == "codeb_phone" && phoneTool != null) {
+            scope.launch {
+                val result=try {kotlinx.coroutines.withTimeout(15_000) {phoneTool.invoke(params)}} catch(e:Exception) {
+                    if(e is CancellationException && e !is kotlinx.coroutines.TimeoutCancellationException)throw e
+                    buildJsonObject {put("success",false);put("contentItems",buildJsonArray {add(buildJsonObject {put("type","inputText");put("text",e.message ?: "Phone operation failed")})})}
+                }
+                respond(id,result,originalId)
+            }
+            return
+        }
         val request = when (method) {
             "item/commandExecution/requestApproval", "execCommandApproval" -> ApprovalRequest(
                 requestId = id,

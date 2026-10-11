@@ -12,6 +12,7 @@ import com.codex.remote.data.ssh.SshAppServerTransportFactory
 import com.codex.remote.data.ssh.UnknownHostKeyException
 import com.codex.remote.data.store.ConnectionStore
 import com.codex.remote.data.store.LocalStore
+import com.codex.remote.data.api.resolved
 import com.codex.remote.domain.AppUiState
 import com.codex.remote.domain.ApprovalKind
 import com.codex.remote.domain.ConnectionDraft
@@ -77,6 +78,65 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         return (rpc ?: error("SSH is offline")).readArtifact(path, root)
     }
 
+    suspend fun refreshQueue() {
+        val thread = _state.value.selectedThreadId ?: return
+        val client = rpc ?: return
+        runCatching { client.queuedMessages(thread) }.onSuccess { messages ->
+            _state.update { if(it.selectedThreadId == thread) it.copy(queueMessages=messages,queueAvailable=true) else it }
+        }.onFailure { if(it is CancellationException) throw it
+            if(it.message.orEmpty().contains("method",true)) _state.update { it.copy(queueAvailable=false) }
+        }
+    }
+
+    fun queueMessage(text: String, mentions: List<ComposerMention>, attachments: List<ComposerImageAttachment>) {
+        val thread = _state.value.selectedThreadId ?: return
+        val client = rpc ?: return
+        viewModelScope.launch {
+            runCatching { client.queueMessage(thread,text,mentions,attachments) }.onSuccess { _state.update { if(it.selectedThreadId==thread)it.copy(failedSend=null) else it };refreshQueue() }
+                .onFailure { error ->
+                    if(error is CancellationException)throw error
+                    updateThreadState(thread) { it.copy(failedSend=FailedSend("queue-failed-${java.util.UUID.randomUUID()}",text,mentions,attachments,false)) }
+                    showError(error)
+                }
+        }
+    }
+
+    fun deleteQueuedMessage(id: String) {
+        val thread = _state.value.selectedThreadId ?: return
+        val client = rpc ?: return
+        viewModelScope.launch { runCatching { client.deleteQueuedMessage(thread,id);refreshQueue() }.onFailure(::showError) }
+    }
+
+    fun steerQueuedMessage(id: String) {
+        val current=_state.value
+        val thread=current.selectedThreadId ?: return
+        val client=rpc ?: return
+        if(current.queueActionId!=null)return
+        _state.update {it.copy(queueActionId=id)}
+        viewModelScope.launch {
+            try {
+                stopJobs[thread]?.join()
+                stopKeys.remove(thread)
+                updateThreadState(thread) { it.copy(stopRequested = false) }
+                client.steerQueuedMessage(thread,id)
+                updateThreadState(thread) {it.copy(notice=uiText(R.string.queue_steered,"Message sent to the current task"))}
+            } catch(error: Exception) {
+                if(error is CancellationException)throw error
+                if(error is com.codex.remote.data.rpc.QueuedSteerUncertain) updateThreadState(thread) {
+                    it.copy(failedSend=FailedSend("queue-failed-${java.util.UUID.randomUUID()}",error.originalText,emptyList(),emptyList(),false))
+                }
+                showError(error)
+            } finally {
+                updateThreadState(thread) {it.copy(queueActionId=null)}
+                refreshQueue()
+            }
+        }
+    }
+
+    fun phoneFiles(): com.codex.remote.data.local.PhoneFiles {
+        return com.codex.remote.data.local.PhoneFiles(getApplication(), "/", rpc ?: error("Phone workspace is offline"))
+    }
+
     private var rpc: CodexRpcClient? = null
     private var eventJob: Job? = null
     private var didRestoreLastConnection = false
@@ -88,11 +148,27 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     private var backgroundCacheJob: Job? = null
     private val dirtyThreads = mutableSetOf<String>()
     private val turnVersions = mutableMapOf<String, Long>()
+    private val stopJobs = mutableMapOf<String, Job>()
+    private val sendJobs = mutableMapOf<String, Job>()
+    private val stopKeys = mutableSetOf<String>()
+    private val interruptedTurns = mutableSetOf<Pair<String, String>>()
     private var retryAllowed = true
     private var retryAt = 0L
     private var retryDelayMs = 5_000L
 
+    private var phoneProvider: com.codex.remote.data.store.ApiProvider? = null
     init {
+        viewModelScope.launch {
+            kotlinx.coroutines.flow.combine(state, com.codex.remote.data.local.PhoneControl.session) { snapshot, identity -> snapshot to identity }.collect { (snapshot, identity) ->
+                val access=snapshot.activeConnection?.localAccess
+                val provider=phoneProvider
+                if(access!=null && provider!=null && identity=="$access:${com.codex.remote.ui.phoneModelIdentity(provider,snapshot.selectedModel.orEmpty())}") {
+                    com.codex.remote.data.local.PhoneControl.pauseTask={stopTurn(revokePhone = false)}
+                    com.codex.remote.data.local.PhoneControl.resumeTask={sendMessage("Continue the paused task from the current state. Observe the screen again before acting.")}
+                    com.codex.remote.data.local.PhoneControl.report(snapshot.isTurnRunning,snapshot.timeline.lastOrNull {it.kind==TimelineKind.AGENT}?.body.orEmpty())
+                }
+            }
+        }
         viewModelScope.launch {
             store.connections.collect { connections ->
                 val sortedConnections = connections.sortedByDescending { it.lastUsedAt }
@@ -179,7 +255,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     }
 
     fun connect(connection: SavedConnection) {
-        retryAllowed = true
+        retryAllowed = connection.localAccess == null
         com.codex.remote.data.diagnostics.DebugApi.record("remote_connect")
         if (managerOnly) {
             _state.update { it.copy(activeConnection = connection, showConnections = false,
@@ -198,9 +274,11 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 runCatching { withContext(Dispatchers.IO) { cache.session(connection.id, id) } }.getOrNull()
             }
             disconnectInternal(clearActive = false)
+            stopKeys.clear()
             _state.update {
                 it.copy(
                     activeConnection = connection,
+                    stopRequested = false,
                     connectionStatus = ConnectionStatus.CONNECTING,
                     connectionMessage = uiText(R.string.connecting_host, "正在连接 %1\$s…", connection.name),
                     showConnections = false,
@@ -254,27 +332,58 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 )
             }
             runCatching {
-                val secrets = withContext(Dispatchers.IO) { store.decrypt(connection) }
-                val transport = transportFactory.open(connection, secrets)
-                val client = CodexRpcClient(transport)
+                val transport = if (connection.localAccess != null) {
+                    com.codex.remote.data.local.TermuxTransport.open(getApplication(), connection)
+                } else {
+                    val secrets = withContext(Dispatchers.IO) { store.decrypt(connection) }
+                    transportFactory.open(connection, secrets)
+                }
+                if (transport is com.codex.remote.data.local.TermuxTransport) {
+                    _state.update { it.copy(selectedProjectPath = it.selectedProjectPath ?: transport.cwd) }
+                }
+                val client = CodexRpcClient(transport, if(connection.localAccess != null) { params ->
+                    val snapshot=_state.value
+                    val provider=com.codex.remote.data.store.ApiStore(getApplication()).providers().firstOrNull {it.id==connection.localProviderId&&it.enabled}
+                    val connected=(transport as com.codex.remote.data.local.TermuxTransport).provider
+                    check(provider!=null && com.codex.remote.ui.phoneModelIdentity(provider,snapshot.selectedModel.orEmpty())==
+                        com.codex.remote.ui.phoneModelIdentity(connected,snapshot.selectedModel.orEmpty())) {"Provider configuration changed. Reconnect the phone workspace before enabling control."}
+                    val identity=provider?.let {"${connection.localAccess}:${com.codex.remote.ui.phoneModelIdentity(it,snapshot.selectedModel.orEmpty())}"}.orEmpty()
+                    val thread=params["threadId"]?.let { (it as? kotlinx.serialization.json.JsonPrimitive)?.content }
+                    com.codex.remote.data.local.PhoneControl.call(if(thread==snapshot.selectedThreadId)identity else "",
+                        params["arguments"] as? kotlinx.serialization.json.JsonObject ?: kotlinx.serialization.json.JsonObject(emptyMap()))
+                } else null)
+                phoneProvider=(transport as? com.codex.remote.data.local.TermuxTransport)?.provider
                 rpc = client
                 observeEvents(client)
                 val server = withTimeout(20_000) { client.initialize() }
                 val bootstrap = coroutineScope {
                     val account = async { withTimeout(20_000) { client.readAccount() } }
-                    val models = async { withTimeout(30_000) { client.listModels() } }
+                    val models = async {
+                        if (connection.localAccess == null) withTimeout(30_000) { client.listModels() }
+                        else withContext(Dispatchers.IO) {
+                            val provider = com.codex.remote.data.store.ApiStore(getApplication()).providers().first { it.id == connection.localProviderId }
+                                .resolved(com.codex.remote.data.api.ReasoningCatalogStore(getApplication()).cached())
+                            val preferred=getApplication<Application>().getSharedPreferences("phone-work",0).getString("model:${provider.id}",provider.selectedModel)
+                            provider.models.map { model -> RemoteModel(model.id, model.id, provider.name, model.id == preferred,
+                                supportedReasoningEfforts = model.efforts.map { com.codex.remote.domain.ReasoningEffortOption(it) },
+                                defaultReasoningEffort = provider.effort.takeIf { it in model.efforts }) }
+                        }
+                    }
                     val threads = async { withTimeout(60_000) { client.listThreads() } }
                     val modes = async { runCatching { withTimeout(3_000) { client.listCollaborationModes() } }.getOrDefault(emptyList()) }
                     val permissions = async { runCatching { withTimeout(3_000) { client.listPermissionProfiles(null) } }.getOrDefault(emptyList()) }
                     ConnectionBootstrap(server, account.await(), models.await(), threads.await(), modes.await(), permissions.await())
                 }
-                store.recordUsed(connection.id)
+                if (connection.localAccess == null) store.recordUsed(connection.id)
                 bootstrap
             }.onSuccess { bootstrap ->
                 retryDelayMs = 5_000
-                val projects = groupThreadsByProject(bootstrap.threads, _state.value.projects.map { it.path })
-                val savedDefaults = cache.composerDefaults()
-                val defaults = (cachedSession?.let { ComposerDefaults(it.model, it.reasoningEffort, it.serviceTier, isConfigured = true) }
+                val projects = groupThreadsByProject(bootstrap.threads, (_state.value.projects.map { it.path } + listOfNotNull(_state.value.selectedProjectPath)).distinct())
+                val savedDefaults = if (connection.localAccess != null) {
+                    val preferred = bootstrap.models.firstOrNull { it.isDefault }
+                    ComposerDefaults(preferred?.id, preferred?.defaultReasoningEffort, isConfigured = true)
+                } else cache.composerDefaults()
+                val defaults = (if(connection.localAccess!=null) savedDefaults else cachedSession?.let { ComposerDefaults(it.model, it.reasoningEffort, it.serviceTier, isConfigured = true) }
                     ?: savedDefaults).forModels(bootstrap.models)
                 if (!savedDefaults.isConfigured && cachedSession != null && defaults.model != null) {
                     runCatching { cache.saveComposerDefaults(defaults) }
@@ -361,12 +470,15 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     }
 
     fun disconnect() {
+        if(_state.value.activeConnection?.localAccess!=null)com.codex.remote.data.local.PhoneControl.stop()
         connectJob?.cancel()
         viewModelScope.launch { disconnectInternal(clearActive = true) }
     }
 
     private fun disconnectInternal(clearActive: Boolean) {
         rememberThread()
+        sendJobs.values.forEach { it.cancel() }
+        sendJobs.clear()
         resumedThreads.clear()
         selectThreadJob?.cancel()
         readOnlyJob?.cancel()
@@ -429,13 +541,21 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         }
     }
 
+    private fun preferredPhoneModel(state: AppUiState): String? {
+        val connection=state.activeConnection?.takeIf {it.localAccess!=null} ?: return null
+        val chosen=getApplication<Application>().getSharedPreferences("phone-work",0).getString("model:${connection.localProviderId}",null)
+        return chosen?.takeIf {id -> state.models.any {it.id==id}}
+    }
+
     fun newThread() {
         rememberThread()
         selectThreadJob?.cancel()
         readOnlyJob?.cancel()
         _state.update { state ->
             val projectPath = state.selectedProjectPath ?: state.projects.firstOrNull()?.path
-            val savedDefaults = cache.composerDefaults()
+            val savedDefaults = if (state.activeConnection?.localAccess != null)
+                ComposerDefaults(preferredPhoneModel(state) ?: state.selectedModel, state.selectedReasoningEffort, state.selectedServiceTier, isConfigured = true)
+                else cache.composerDefaults()
             val defaults = (if (!savedDefaults.isConfigured && state.selectedModel != null)
                 ComposerDefaults(state.selectedModel, state.selectedReasoningEffort, state.selectedServiceTier, isConfigured = true)
                 else savedDefaults).forModels(state.models)
@@ -445,6 +565,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 state.copy(
                     selectedProjectPath = projectPath,
                     selectedThreadId = null,
+                    queueMessages = emptyList(),
                     selectedModel = defaults.model,
                     selectedReasoningEffort = defaults.reasoningEffort,
                     selectedServiceTier = defaults.serviceTier,
@@ -476,7 +597,9 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         selectThreadJob?.cancel()
         readOnlyJob?.cancel()
         _state.update {
-            val savedDefaults = cache.composerDefaults()
+            val savedDefaults = if (it.activeConnection?.localAccess != null)
+                ComposerDefaults(preferredPhoneModel(it) ?: it.selectedModel, it.selectedReasoningEffort, it.selectedServiceTier, isConfigured = true)
+                else cache.composerDefaults()
             val defaults = (if (!savedDefaults.isConfigured && it.selectedModel != null)
                 ComposerDefaults(it.selectedModel, it.selectedReasoningEffort, it.selectedServiceTier, isConfigured = true)
                 else savedDefaults).forModels(it.models)
@@ -515,7 +638,10 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         selectThreadJob?.cancel()
         readOnlyJob?.cancel()
         threadStates[thread.id]?.takeIf { thread.id in resumedThreads && !it.isBusy }?.let { saved ->
-            _state.update { it.withConversation(saved) }
+            _state.update {
+                val restored=it.withConversation(saved)
+                if(restored.isTurnRunning)restored else preferredPhoneModel(restored)?.let {id -> restored.copy(selectedModel=id)} ?: restored
+            }
             return
         }
         selectThreadJob = viewModelScope.launch {
@@ -532,6 +658,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 it.copy(
                     selectedProjectPath = projectPath,
                     selectedThreadId = thread.id,
+                    queueMessages = emptyList(),
                     turnStartedAt = remembered?.turnStartedAt ?: 0,
                     failedSend = null,
                     threadGoal = null,
@@ -559,10 +686,14 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         _state.update { it.copy(isBusy = false, isGoalLoading = false, isReadOnlyThread = true) }
                         readOnlyJob = viewModelScope.launch {
                             while (isActive && _state.value.selectedThreadId == thread.id) {
+                                val restored = runCatching { client.resumeThread(thread.id, thread.cwd) }
+                                if (restored.isSuccess) { selectThread(thread); break }
                                 runCatching { client.readThreadSession(thread.id, thread.cwd) }.onSuccess { read ->
                                     _state.update { state ->
                                         if (state.selectedThreadId != thread.id) state else state.copy(
                                             timeline = mergeTimelineHistory(state.timeline, read.timeline),
+                                            isTurnRunning = read.activeTurnId != null,
+                                            activeTurnId = read.activeTurnId,
                                             olderHistoryCursor = read.olderHistoryCursor,
                                             hasOlderHistory = read.olderHistoryCursor != null,
                                         )
@@ -581,7 +712,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 }
             _state.update { state ->
                 if (state.selectedThreadId != thread.id) return@update state
-                val model = state.models.firstOrNull { it.id == session.model }
+                val model = state.models.firstOrNull { it.id == (if(session.activeTurnId==null) preferredPhoneModel(state) ?: session.model else session.model) }
                 val liveItems = state.timeline.filter { cachedItems[it.id] != it }.associateBy { it.id }
                 val confirmedBodies = session.timeline.filter { it.kind == TimelineKind.USER }.mapTo(mutableSetOf()) { it.body }
                 val restoredTimeline = state.timeline.filterNot { item ->
@@ -727,6 +858,11 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         attachments: List<ComposerImageAttachment> = emptyList(),
         asGoal: Boolean = false,
     ) {
+        _state.value.activeConnection?.takeIf { it.localAccess != null }?.let { connection ->
+            if (com.codex.remote.data.store.ApiStore(getApplication()).providers().none { it.id == connection.localProviderId && it.enabled }) {
+                _state.update { it.copy(notice = uiText(R.string.provider_disabled, "Provider is disabled. Select an enabled provider.")) }; return
+            }
+        }
         if (_state.value.isReadOnlyThread) return
         val prompt = text.trim()
         if (prompt.isEmpty() && attachments.isEmpty()) return
@@ -772,7 +908,19 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
             _state.update { it.copy(notice = uiText(R.string.ui_306, "正在恢复运行中的任务，请等远端 turn id 同步后再追加消息")) }
             return
         }
-        viewModelScope.launch {
+        val sendKey = currentState.selectedThreadId ?: "project:$cwd"
+        val previousSend = sendJobs[sendKey]
+        sendJobs[sendKey] = viewModelScope.launch {
+            if (sendKey in stopKeys) {
+                previousSend?.join()
+                stopJobs[sendKey]?.join()
+            }
+            if (rpc !== client) return@launch
+            if (_state.value.selectedThreadId != currentState.selectedThreadId || _state.value.selectedProjectPath != currentState.selectedProjectPath) {
+                updateThreadState(currentState.selectedThreadId) { it.copy(failedSend = FailedSend("deferred-${UUID.randomUUID()}", prompt, mentions, attachments, asGoal)) }
+                return@launch
+            }
+            stopKeys.remove(sendKey)
             val localItemId = "local-${UUID.randomUUID()}"
             var targetThreadId = currentState.selectedThreadId
             val userItem = TimelineItem(
@@ -789,7 +937,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 turnId = steeringTurnId,
             )
             _state.update {
-                it.copy(
+                val sending = it.copy(
                     timeline = it.timeline.filterNot { item -> item.kind == TimelineKind.USER && item.status == "sendFailed" && item.body == userItem.body } + userItem,
                     failedSend = null,
                     isTurnRunning = if (asGoal) it.isTurnRunning else true,
@@ -797,7 +945,10 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     isGoalLoading = if (asGoal) true else it.isGoalLoading,
                     goalError = if (asGoal) null else it.goalError,
                     notice = null,
+                    stopRequested = false,
                 )
+                if (asGoal) sending else sending.withTurnRunning(targetThreadId, steeringTurnId, true,
+                    android.os.SystemClock.elapsedRealtime(), System.currentTimeMillis())
             }
             val outgoingState = _state.value
             runCatching {
@@ -840,6 +991,12 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     started.id
                 }
                 targetThreadId = threadId
+                sendJobs[threadId] = kotlinx.coroutines.currentCoroutineContext()[Job]!!
+                if (sendKey in stopKeys || threadId in stopKeys) {
+                    stopKeys += threadId
+                    updateThreadState(threadId) { it.copy(isTurnRunning = false, activeTurnId = null, turnStartedAt = 0, stopRequested = true) }
+                    return@runCatching
+                }
                 if (asGoal) {
                     val goal = client.setThreadGoal(
                         threadId = threadId,
@@ -869,13 +1026,17 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     mentions = mentions,
                     attachments = attachments,
                 )
+                if (sendKey in stopKeys || threadId in stopKeys) requestStop(client, threadId, null, currentState.activeConnection?.localAccess != null)
             }.onSuccess {
                 if (steeringThreadId != null) {
                     _state.update { it.copy(notice = uiText(R.string.ui_307, "已追加到当前运行中的任务")) }
                 }
             }.onFailure { error ->
+                if (sendKey in stopKeys || targetThreadId in stopKeys) return@onFailure
                 val markFailed: (AppUiState) -> AppUiState = {
-                    it.copy(
+                    val failed = if (asGoal || steeringThreadId != null) it else it.withTurnRunning(targetThreadId, it.activeTurnId, false,
+                        android.os.SystemClock.elapsedRealtime(), System.currentTimeMillis())
+                    failed.copy(
                         timeline = it.timeline.map { item -> if (item.id == localItemId) item.copy(status = "sendFailed", title = friendlyError(error)) else item },
                         isTurnRunning = if (asGoal) it.isTurnRunning else steeringThreadId != null,
                         activeTurnId = if (asGoal || steeringThreadId != null) it.activeTurnId else null,
@@ -1361,12 +1522,46 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         }
     }
 
-    fun interruptTurn() {
+    fun interruptTurn() = stopTurn(revokePhone = true)
+
+    private fun stopTurn(revokePhone: Boolean) {
+        val snapshot = _state.value
+        val threadId = snapshot.selectedThreadId
+        val key = threadId ?: "project:${snapshot.selectedProjectPath}"
+        stopKeys += key
+        sendJobs[key]?.cancel()
+        snapshot.activeTurnId?.let { turn -> threadId?.let { interruptedTurns += it to turn } }
+        if (revokePhone && snapshot.activeConnection?.localAccess != null) com.codex.remote.data.local.PhoneControl.stop()
+        _state.update { it.withTurnRunning(threadId, snapshot.activeTurnId, false,
+            android.os.SystemClock.elapsedRealtime(), System.currentTimeMillis()).copy(
+            isTurnRunning = false, activeTurnId = null, turnStartedAt = 0, pendingApproval = null, stopRequested = true,
+            notice = uiText(R.string.task_stopped, "Stopped")) }
+        rememberThread()
         val client = rpc ?: return
-        val threadId = _state.value.selectedThreadId ?: return
-        val turnId = _state.value.activeTurnId ?: return
-        viewModelScope.launch {
-            runCatching { client.interruptTurn(threadId, turnId) }.onFailure(::showError)
+        if (threadId != null) requestStop(client, threadId, snapshot.activeTurnId, snapshot.activeConnection?.localAccess != null)
+        else if (snapshot.activeConnection?.localAccess != null) {
+            // ponytail: before thread/start replies there is no interrupt target; close our own runtime.
+            viewModelScope.launch {
+                if (rpc === client) {
+                    disconnect()
+                    _state.update { it.copy(stopRequested = true, notice = uiText(R.string.stop_disconnected, "Stopped the local runtime; reconnect to continue")) }
+                }
+            }
+        }
+    }
+
+    private fun requestStop(client: CodexRpcClient, threadId: String, hint: String?, local: Boolean) {
+        if (stopJobs[threadId]?.isActive == true) return
+        stopJobs[threadId] = viewModelScope.launch {
+            try {
+                withTimeout(8_000) { client.interruptActiveTurn(threadId, hint) }?.let { interruptedTurns += threadId to it }
+            } catch (error: Exception) {
+                if (error is CancellationException && error !is kotlinx.coroutines.TimeoutCancellationException) throw error
+                if (local && rpc === client) {
+                    disconnect()
+                    _state.update { it.copy(isTurnRunning = false, activeTurnId = null, stopRequested = true, notice = uiText(R.string.stop_disconnected, "Stopped the local runtime; reconnect to continue")) }
+                } else if (rpc === client) showError(error)
+            }
         }
     }
 
@@ -1406,6 +1601,10 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     }
 
     fun setModel(modelId: String) {
+        _state.value.activeConnection?.takeIf {it.localAccess!=null}?.localProviderId?.let {provider->
+            getApplication<Application>().getSharedPreferences("phone-work",0).edit().putString("model:$provider",modelId).apply()
+        }
+        if(_state.value.activeConnection?.localAccess!=null && _state.value.selectedModel!=modelId)com.codex.remote.data.local.PhoneControl.stop()
         val state = _state.value
         if (state.models.none { it.id == modelId }) return
         val defaults = ComposerDefaults(modelId, state.selectedReasoningEffort, state.selectedServiceTier, isConfigured = true).forModels(state.models)
@@ -1430,6 +1629,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
 
     private fun saveComposerDefaults() {
         val state = _state.value
+        if (state.activeConnection?.localAccess != null) return
         runCatching { cache.saveComposerDefaults(ComposerDefaults(state.selectedModel, state.selectedReasoningEffort, state.selectedServiceTier)) }
             .onFailure { _state.update { it.copy(notice = uiText(R.string.ui_295, "Local storage failed. Existing files were kept.")) } }
     }
@@ -1556,6 +1756,15 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     is AppServerEvent.ReasoningDelta -> appendDelta(event.threadId, event.itemId, event.delta, TimelineKind.REASONING)
                     is AppServerEvent.OutputDelta -> appendDelta(event.threadId, event.itemId, event.delta, TimelineKind.COMMAND)
                     is AppServerEvent.TurnRunning -> {
+                        if (!event.running && event.threadId != null && event.turnId != null && event.threadId to event.turnId in interruptedTurns) {
+                            refreshThreads()
+                            return@collect
+                        }
+                        if (event.running && event.threadId != null && event.turnId != null &&
+                            (event.threadId in stopKeys || event.threadId to event.turnId in interruptedTurns)) {
+                            requestStop(client, event.threadId, event.turnId, _state.value.activeConnection?.localAccess != null)
+                            return@collect
+                        }
                         event.threadId?.let { turnVersions[it] = (turnVersions[it] ?: 0) + 1 }
                         updateThreadState(event.threadId) { state ->
                             state.withTurnRunning(event.threadId, event.turnId, event.running,
@@ -1568,7 +1777,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         }
                     }
                     is AppServerEvent.Approval -> updateThreadState(event.threadId) { state ->
-                        if (state.acceptsThreadEvent(event.threadId)) state.copy(pendingApproval = event.request) else state
+                        if (!state.stopRequested && state.acceptsThreadEvent(event.threadId)) state.copy(pendingApproval = event.request) else state
                     }
                     AppServerEvent.AccountChanged -> refreshRemoteAccount()
                     AppServerEvent.ThreadsChanged -> refreshThreads()
@@ -1753,6 +1962,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     }
 
     private fun upsertItem(threadId: String?, item: TimelineItem) = updateThreadState(threadId) { state ->
+        if (state.stopRequested || (threadId != null && item.turnId != null && threadId to item.turnId in interruptedTurns)) return@updateThreadState state
         val index = state.timeline.indexOfFirst { it.id == item.id }
         val update = item.copy(turnId = item.turnId ?: state.activeTurnId).preservingTurnMetadata(state.timeline.getOrNull(index))
         val localUserIndex = if (item.kind == TimelineKind.USER) {
@@ -1765,7 +1975,11 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     }
 
     private fun appendDelta(threadId: String?, id: String, delta: String, kind: TimelineKind) =
-        updateThreadState(threadId) { it.withStreamDelta(threadId, id, delta, kind) }
+        updateThreadState(threadId) { state ->
+            val turn = state.timeline.firstOrNull { it.id == id }?.turnId
+            if (state.stopRequested || (threadId != null && turn != null && threadId to turn in interruptedTurns)) state
+            else state.withStreamDelta(threadId, id, delta, kind)
+        }
 
     private fun rememberThread() {
         val snapshot = _state.value
@@ -1801,7 +2015,9 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
             runCatching { client.listThreads() }
                 .onSuccess { threads ->
                     _state.update { state ->
-                        state.withThreadIndex(threads).copy(
+                        val runningIds = threadStates.filter { (id, saved) -> id != state.selectedThreadId && saved.isTurnRunning && !saved.stopRequested }.keys +
+                            setOfNotNull(state.selectedThreadId.takeIf { state.isTurnRunning && !state.stopRequested })
+                        state.withThreadIndex(threads, runningIds).copy(
                             connectionMessage = connectionSummary(
                                 groupThreadsByProject(threads).size,
                                 threads.size,
@@ -1905,7 +2121,7 @@ internal fun AppUiState.withConversation(saved: AppUiState): AppUiState = copy(
     selectedPermissionProfile = saved.selectedPermissionProfile, approvalPolicy = saved.approvalPolicy,
     approvalsReviewer = saved.approvalsReviewer, pendingApproval = saved.pendingApproval,
     threadGoal = saved.threadGoal, threadTokenUsage = saved.threadTokenUsage,
-    failedSend = saved.failedSend, isReadOnlyThread = saved.isReadOnlyThread, isBusy = false,
+    failedSend = saved.failedSend, isReadOnlyThread = saved.isReadOnlyThread, isBusy = false, stopRequested = saved.stopRequested,
     isGoalLoading = false, goalError = null,
 )
 

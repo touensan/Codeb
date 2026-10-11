@@ -24,6 +24,8 @@ data class SavedConnection(
     val hostKeyFingerprint: String = "",
     val platform: RemotePlatform = RemotePlatform.AUTO,
     val lastUsedAt: Long = 0,
+    val localAccess: String? = null,
+    val localProviderId: String? = null,
 )
 
 data class ConnectionDraft(
@@ -405,10 +407,14 @@ enum class ApprovalKind { COMMAND, FILE_CHANGE, PERMISSION, USER_INPUT, UNKNOWN 
 
 enum class PermissionMode { ASK, AUTO_REVIEW, FULL_ACCESS, READ_ONLY }
 
-internal fun AppUiState.withThreadIndex(index: List<RemoteThread>): AppUiState {
+internal fun AppUiState.withThreadIndex(
+    index: List<RemoteThread>,
+    runningThreadIds: Set<String> = setOfNotNull(selectedThreadId.takeIf { isTurnRunning && !stopRequested }),
+): AppUiState {
     // A paginated index is not a deletion signal; new threads can appear in it later.
     val opened = threads.firstOrNull { it.id == selectedThreadId }
-    val refreshed = if (opened != null && index.none { it.id == opened.id }) index + opened else index
+    val refreshed = (if (opened != null && index.none { it.id == opened.id }) index + opened else index)
+        .map { if (it.id in runningThreadIds) it.copy(status = "active") else it }
     val projects = groupThreadsByProject(refreshed, projects.map { it.path })
     return copy(threads = refreshed, projects = projects,
         selectedProjectPath = selectedProjectPath ?: projects.firstOrNull()?.path)
@@ -431,6 +437,7 @@ internal fun AppUiState.withTurnRunning(
     reportedCompletedAt: Long? = null,
 ): AppUiState {
     if (threadId == null) return this
+    if (stopRequested) return this
     val index = threads.map { if (it.id == threadId) it.copy(status = if (running) "active" else "idle") else it }
     if (selectedThreadId != threadId) return copy(threads = index, projects = groupThreadsByProject(index, projects.map { it.path }))
     if (!running && activeTurnId != null && turnId != null && turnId != activeTurnId) return this
@@ -478,6 +485,10 @@ data class ApprovalRequest(
 enum class ConnectionStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
 data class AppUiState(
+    val stopRequested: Boolean = false,
+    val queueMessages: List<Pair<String, String>> = emptyList(),
+    val queueAvailable: Boolean = true,
+    val queueActionId: String? = null,
     val failedSend: FailedSend? = null,
     val savedConnections: List<SavedConnection> = emptyList(),
     val activeConnection: SavedConnection? = null,

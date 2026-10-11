@@ -12,6 +12,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.*
+import androidx.compose.animation.*
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -75,6 +77,11 @@ fun CodexRemoteApp(manager: AppViewModel, local: LocalViewModel = viewModel()) {
     val localState by local.state.collectAsState()
     val context = LocalContext.current
     var mode by rememberSaveable { mutableStateOf("chat") }
+    val returnToChat by com.codex.remote.data.local.PhoneControl.returnToChat.collectAsState()
+    LaunchedEffect(returnToChat){if(returnToChat>0)mode="work"}
+    var dailyFiles by remember {mutableStateOf(false)}
+    if(dailyFiles) {val files=remember(localState.selected?.id){local.conversationFiles()};FileManagerScreen(files,files.root){dailyFiles=false}}
+    LaunchedEffect(mode) {if(mode!="work")com.codex.remote.data.local.PhoneControl.stop()}
     var settings by rememberSaveable { mutableStateOf(false) }
     var providerEditor by remember { mutableStateOf(false) }
     var editingProvider by remember { mutableStateOf<ApiProvider?>(null) }
@@ -144,8 +151,9 @@ fun CodexRemoteApp(manager: AppViewModel, local: LocalViewModel = viewModel()) {
     }
     val navigation: @Composable (() -> Unit) -> Unit = { closeDrawer ->
         val select: (String) -> Unit = { target -> navigate(target); closeDrawer() }
-        NavigationDrawerItem(label = { Text(uiText(R.string.ui_250, "Chat")) }, selected = mode == "chat", icon = { Icon(Icons.Outlined.ChatBubbleOutline, null) }, onClick = { select("chat") })
-        NavigationDrawerItem(label = { Text("Codex") }, selected = mode == "remote", icon = { Icon(Icons.Outlined.Terminal, null) }, onClick = { select("remote") })
+        NavigationDrawerItem(label = { Text(uiText(R.string.mode_daily, "Daily")) }, selected = mode == "chat", icon = { Icon(Icons.Outlined.ChatBubbleOutline, null) }, onClick = { select("chat") }, modifier = Modifier.testTag("mode-daily"))
+        NavigationDrawerItem(label = { Text(uiText(R.string.mode_work, "Work")) }, selected = mode == "work", icon = { Icon(Icons.Outlined.PhoneAndroid, null) }, onClick = { select("work") }, modifier = Modifier.testTag("mode-work"))
+        NavigationDrawerItem(label = { Text(uiText(R.string.mode_remote, "Remote Codex")) }, selected = mode == "remote", icon = { Icon(Icons.Outlined.Terminal, null) }, onClick = { select("remote") })
         NavigationDrawerItem(label = { Text(uiText(R.string.ui_227, "Connections")) }, selected = false, icon = { Icon(Icons.Outlined.Link, null) }, onClick = { manager.showConnections(true); select("remote") })
         NavigationDrawerItem(label = { Text(uiText(R.string.ui_253, "Settings")) }, selected = false, icon = { Icon(Icons.Outlined.Settings, null) }, onClick = { settings = true; local.refresh(); closeDrawer(); scope.launch { drawer.close() } })
     }
@@ -216,7 +224,15 @@ fun CodexRemoteApp(manager: AppViewModel, local: LocalViewModel = viewModel()) {
             }
         }
     }
-    if (mode == "remote" && !managed.showConnections && host != null && connection != null && !allHosts) {
+    AnimatedContent(mode, transitionSpec={
+        (fadeIn(tween(180))+slideInHorizontally(tween(200)){it/14}) togetherWith fadeOut(tween(100))
+    },label="codeb-mode") { visibleMode ->
+    if (visibleMode == "work") {
+        LocalWorkScreen(localState.providers, localState.providerId, onBack = { navigate("chat") },
+            onSettings = { settings = true; local.refresh() }, navigation = { navigation { } }, sidebar = sidebar)
+        return@AnimatedContent
+    }
+    if (visibleMode == "remote" && !managed.showConnections && host != null && connection != null && !allHosts) {
         LaunchedEffect(pendingThread, hostStates[connection.id]?.connectionStatus) {
             val pending = pendingThread
             if (pending?.first == connection.id && hostStates[connection.id]?.connectionStatus == ConnectionStatus.CONNECTED) {
@@ -226,7 +242,7 @@ fun CodexRemoteApp(manager: AppViewModel, local: LocalViewModel = viewModel()) {
         }
         RemoteWorkspace(host, onOpenHosts = { manager.showConnections(true) }, navigation = { navigation { } }, sidebarContent = sidebar,
             hostSelector = hostSelector)
-        return
+        return@AnimatedContent
     }
     ModalNavigationDrawer(drawerState = drawer, drawerContent = {
         ModalDrawerSheet(modifier = Modifier.widthIn(max = 330.dp).fillMaxHeight(), drawerContainerColor = MaterialTheme.colorScheme.background) {
@@ -235,7 +251,7 @@ fun CodexRemoteApp(manager: AppViewModel, local: LocalViewModel = viewModel()) {
     }) {
         Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).statusBarsPadding()) {
             Box(Modifier.fillMaxWidth().height(72.dp).padding(horizontal = 16.dp), contentAlignment = Alignment.Center) {
-                val hasConversation = (mode == "chat" || mode == "work") && localState.selected?.messages?.any { it.role == "user" } == true
+                val hasConversation = (visibleMode == "chat" || visibleMode == "work") && localState.selected?.messages?.any { it.role == "user" } == true
                 Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer,
                     modifier = Modifier.align(Alignment.CenterStart).padding(end = 56.dp).animateContentSize()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -246,14 +262,21 @@ fun CodexRemoteApp(manager: AppViewModel, local: LocalViewModel = viewModel()) {
                         }
                     }
                 }
-                if (mode == "chat" || mode == "work") {
+                if (visibleMode == "chat" || visibleMode == "work") {
                     Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.align(Alignment.CenterEnd)) {
-                        IconButton(onClick = { local.newConversation() }) { Icon(Icons.Outlined.EditNote, uiText(R.string.ui_259, "New chat")) }
+                        Row {
+                            IconButton(onClick = { local.newConversation() }) { Icon(Icons.Outlined.EditNote, uiText(R.string.ui_259, "New chat")) }
+                            var menu by remember {mutableStateOf(false)}
+                            Box {
+                                IconButton(onClick={menu=true}){Icon(Icons.Outlined.MoreVert,uiText(R.string.ui_065,"Actions"))}
+                                DropdownMenu(menu,{menu=false}){DropdownMenuItem(text={Text(uiText(R.string.file_manager,"Files"))},onClick={menu=false;dailyFiles=true})}
+                            }
+                        }
                     }
                 } else if (allHosts) hostSelector() else Text("Codex", style = MaterialTheme.typography.titleLarge)
             }
             Box(Modifier.weight(1f).consumeWindowInsets(WindowInsets.statusBars)) {
-                when (mode) {
+                when (visibleMode) {
                     "chat", "work" -> LocalPane(local, localState.selected?.workspace == true) { editingProvider = null; providerEditor = true }
                     else -> if (allHosts && connection != null) {
                         HostOverview(managed.savedConnections, hostStates) { saved, thread ->
@@ -269,6 +292,7 @@ fun CodexRemoteApp(manager: AppViewModel, local: LocalViewModel = viewModel()) {
                 }
             }
         }
+    }
     }
 }
 
@@ -308,14 +332,14 @@ private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, openSetting
     var addMenu by remember { mutableStateOf(false) }
     var modelsOpen by remember { mutableStateOf(false) }
     var filesOpen by remember { mutableStateOf(false) }
-    var exportFile by remember { mutableStateOf<File?>(null) }
-    val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(viewModel::importFile) }
+    var queueMode by remember(state.selected?.id) { mutableStateOf(true) }
+    if(filesOpen) {
+        val files=remember(state.selected?.id) {viewModel.conversationFiles()}
+        FileManagerScreen(files,files.root) {filesOpen=false}
+    }
     val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(viewModel::attachFile) }
     val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri -> uri?.let(viewModel::attachFile) }
-    val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
-        if (uri != null) exportFile?.let { viewModel.export(it, uri) }
-    }
-    val provider = state.providers.firstOrNull { it.id == state.providerId }?.let { raw -> state.catalog?.let { raw.resolved(it, state.selected) } ?: raw }
+    val provider = state.providers.firstOrNull { it.id == state.providerId && it.enabled }?.let { raw -> state.catalog?.let { raw.resolved(it, state.selected) } ?: raw }
     val messages = state.selected?.messages.orEmpty()
     val displayedReplies = remember(state.selected?.id) { mutableStateMapOf<String, String>() }
     val displayedSnapshot = displayedReplies.toMap()
@@ -414,9 +438,28 @@ private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, openSetting
                 }
             }
         }
+        state.selected?.queuedMessages.orEmpty().forEach { message ->
+            Surface(shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 3.dp).testTag("local-queued-${message.id}")) {
+                Row(Modifier.padding(start = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+                        Text(uiText(if (state.selected?.queuePaused == true) R.string.queue_paused else R.string.queued_message, "Queued"), style = MaterialTheme.typography.labelSmall)
+                        Text(message.text.ifBlank { message.attachments.joinToString { it.name } }, maxLines = 3, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall)
+                    }
+                    TextButton(onClick = { viewModel.steerQueuedMessage(message.id) }, modifier = Modifier.testTag("local-steer-queued-${message.id}")) { Text(uiText(R.string.send_steer, "Steer now")) }
+                    IconButton(onClick = { viewModel.deleteQueuedMessage(message.id) }) { Icon(Icons.Outlined.Close, uiText(R.string.ui_161, "Delete")) }
+                }
+            }
+        }
         Surface(shape = RoundedCornerShape(28.dp), color = MaterialTheme.colorScheme.surfaceContainer,
             modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 10.dp)) {
             Column(Modifier.padding(horizontal = 14.dp, vertical = 12.dp)) {
+                if (state.sending && (draft.isNotBlank() || !state.selected?.attachments.isNullOrEmpty())) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(selected = !queueMode, onClick = { queueMode = false }, label = { Text(uiText(R.string.send_steer, "Steer now")) }, modifier = Modifier.testTag("local-send-steer"))
+                        FilterChip(selected = queueMode, onClick = { queueMode = true }, label = { Text(uiText(R.string.send_queue, "Queue message")) }, modifier = Modifier.testTag("local-send-queue"))
+                    }
+                }
                 state.selected?.attachments.orEmpty().forEach { file ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(if (file.kind == "image") Icons.Outlined.Image else Icons.Outlined.AttachFile, null, Modifier.size(18.dp))
@@ -436,12 +479,12 @@ private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, openSetting
                         IconButton(onClick = { addMenu = true }) { Icon(Icons.Outlined.Add, uiText(R.string.ui_114, "Add")) }
                         DropdownMenu(addMenu, { addMenu = false }) {
                             DropdownMenuItem(text = { Text(uiText(R.string.ui_257, "Files")) }, leadingIcon = { Icon(Icons.Outlined.AttachFile, null) },
-                                enabled = !state.sending, onClick = { filePicker.launch(arrayOf("*/*")); addMenu = false })
+                                onClick = { filePicker.launch(arrayOf("*/*")); addMenu = false })
                             DropdownMenuItem(text = { Text(uiText(R.string.attach_images, "Images")) }, leadingIcon = { Icon(Icons.Outlined.Image, null) },
-                                enabled = !state.sending, onClick = { imagePicker.launch("image/*"); addMenu = false })
+                                onClick = { imagePicker.launch("image/*"); addMenu = false })
+                            DropdownMenuItem(text = { Text(uiText(R.string.file_manager, "Files")) }, leadingIcon = { Icon(Icons.Outlined.FolderOpen, null) },
+                                onClick = { filesOpen = true; addMenu = false })
                             if (workspace && state.selected != null) {
-                                DropdownMenuItem(text = { Text(uiText(R.string.saved_files, "Saved files")) }, leadingIcon = { Icon(Icons.Outlined.FolderOpen, null) },
-                                    onClick = { filesOpen = true; addMenu = false })
                                 DropdownMenuItem(text = { Text(uiText(R.string.generate_image, "Generate image")) }, enabled = !state.sending && draft.isNotBlank() && provider != null,
                                     leadingIcon = { Icon(Icons.Outlined.Image, null) }, onClick = { viewModel.generateImage(); addMenu = false })
                             } else if (state.selected != null) DropdownMenuItem(text = { Text(uiText(R.string.ui_258, "Save to workspace")) },
@@ -465,33 +508,23 @@ private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, openSetting
                                 supportedReasoningEfforts = it.efforts.map { effort -> com.codex.remote.domain.ReasoningEffortOption(effort) }) },
                             selectedModel = provider.selectedModel, effort = provider.effort.takeIf(String::isNotBlank),
                             onModel = { viewModel.selectModel(it) }, onEffort = { viewModel.selectModel(provider.selectedModel, it) },
-                            onDismiss = { modelsOpen = false }, providers = state.providers.map { it.id to it.name },
+                            onDismiss = { modelsOpen = false }, providers = state.providers.filter { it.enabled }.map { it.id to it.name },
                             providerId = provider.id, onProvider = viewModel::provider, onAddProvider = openSettings)
                     }
-                    FilledIconButton(onClick = { if (state.sending) viewModel.stop() else { followLatest = true; viewModel.send() } }, modifier = Modifier.size(42.dp),
+                    if (state.sending && (draft.isNotBlank() || !state.selected?.attachments.isNullOrEmpty())) IconButton(onClick = viewModel::stop, modifier = Modifier.testTag("local-stop")) {
+                        Icon(Icons.Filled.Stop, uiText(R.string.ui_266, "Stop"))
+                    }
+                    val stopAction = state.sending && draft.isBlank() && state.selected?.attachments.isNullOrEmpty()
+                    FilledIconButton(onClick = { if (stopAction) viewModel.stop() else { followLatest = true; viewModel.send(steer = !queueMode); queueMode = true } }, modifier = Modifier.size(42.dp).testTag("local-send"),
                         enabled = state.sending || (draft.isNotBlank() || !state.selected?.attachments.isNullOrEmpty()) && provider != null) {
-                        Icon(if (state.sending) Icons.Filled.Stop else Icons.Outlined.ArrowUpward,
-                            if (state.sending) uiText(R.string.ui_266, "Stop") else uiText(R.string.ui_146, "Send"))
+                        Icon(if (stopAction) Icons.Filled.Stop else Icons.Outlined.ArrowUpward,
+                            if (stopAction) uiText(R.string.ui_266, "Stop") else uiText(R.string.ui_146, "Send"))
                     }
                 }
             }
         }
     }
-    if (filesOpen) AlertDialog(onDismissRequest = { filesOpen = false }, title = { Text(uiText(R.string.ui_269, "Workspace files")) }, text = {
-        Column(Modifier.heightIn(max = 440.dp).verticalScroll(rememberScrollState())) {
-            state.files.forEach { file ->
-                if (file.extension.lowercase() in setOf("png", "jpg", "jpeg", "webp")) {
-                    val bitmap = remember(file.path, file.length()) { android.graphics.BitmapFactory.decodeFile(file.path, android.graphics.BitmapFactory.Options().apply { inSampleSize = 4 }) }
-                    bitmap?.let { androidx.compose.foundation.Image(it.asImageBitmap(), contentDescription = file.name, modifier = Modifier.fillMaxWidth().heightIn(max = 220.dp)) }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(file.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 2)
-                IconButton(onClick = { exportFile = file; exporter.launch(file.name) }) { Icon(Icons.Outlined.Download, contentDescription = uiText(R.string.ui_270, "Export")) }
-            } }
-            TextButton(onClick = { importer.launch(arrayOf("*/*")) }) { Icon(Icons.Outlined.Add, contentDescription = null); Text(uiText(R.string.ui_271, "Import file")) }
-            TextButton(onClick = viewModel::saveReply) { Icon(Icons.Outlined.Save, contentDescription = null); Text(uiText(R.string.ui_272, "Save latest reply")) }
-        }
-    }, confirmButton = { TextButton(onClick = { filesOpen = false }) { Text(uiText(R.string.ui_151, "Close")) } })
+
 }
 
 @Composable
@@ -514,7 +547,7 @@ private fun SettingsPage(state: LocalUiState, local: LocalViewModel, onDismiss: 
             state.providers.forEach { provider ->
                 Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    RadioButton(provider.id == state.providerId, { local.provider(provider.id) })
+                    RadioButton(provider.id == state.providerId, { local.provider(provider.id) }, enabled = provider.enabled && !state.sending)
                     Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f).clickable { onEditProvider(provider) }) {
                         Text(provider.name, style = MaterialTheme.typography.bodyLarge)
@@ -522,6 +555,8 @@ private fun SettingsPage(state: LocalUiState, local: LocalViewModel, onDismiss: 
                         if (provider.id == state.providerId) Text(uiText(R.string.provider_in_use, "In use"), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                     }
                     TextButton(onClick = { onEditProvider(provider) }) { Text(uiText(R.string.model_edit, "Edit")) }
+                    Switch(provider.enabled, { local.enableProvider(provider.id, it) }, enabled = !state.sending,
+                        modifier = Modifier.semantics { contentDescription = uiText(R.string.provider_enabled, "Enable provider") + ": " + provider.name })
                 }
                 HorizontalDivider()
                 }
@@ -565,6 +600,7 @@ private fun SettingsPage(state: LocalUiState, local: LocalViewModel, onDismiss: 
 @Composable
 @OptIn(ExperimentalLayoutApi::class)
 internal fun ProviderEditor(original: ApiProvider?, state: LocalUiState, local: LocalViewModel, onDismiss: () -> Unit) {
+    val context = LocalContext.current
     var name by remember { mutableStateOf(original?.name.orEmpty()) }
     var url by remember { mutableStateOf(original?.baseUrl ?: "https://api.baiyun.si/v1") }
     var key by remember { mutableStateOf("") }
@@ -616,6 +652,21 @@ internal fun ProviderEditor(original: ApiProvider?, state: LocalUiState, local: 
                     if (saved != null) IconButton(onClick = { confirmDelete = true }, enabled = !busy) { Icon(Icons.Outlined.DeleteOutline, contentDescription = uiText(R.string.ui_280, "Delete provider")) }
                 }
                 Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    if (original == null && state.cloud.recommendationsEnabled && state.cloud.recommendations.isNotEmpty()) {
+                        Text(uiText(R.string.cloud_recommendations, "Recommended"), style = MaterialTheme.typography.titleMedium)
+                        state.cloud.recommendations.forEach { item ->
+                            Column(Modifier.fillMaxWidth().testTag("provider-recommendation-${item.id}")) {
+                                Text(item.title, style = MaterialTheme.typography.titleSmall)
+                                Text(item.description, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    TextButton(onClick = { openCloudLink(context, item.url) }) { Text(uiText(R.string.provider_website, "Visit website")) }
+                                    if (android.net.Uri.parse(item.url).host == "api.baiyun.si") TextButton(onClick = { name = "白云 API"; url = "https://api.baiyun.si/v1"; protocol = ApiProtocol.RESPONSES }, enabled = !busy) { Text(uiText(R.string.provider_use, "Use this provider")) }
+                                }
+                            }
+                        }
+                        Text(uiText(R.string.provider_compatibility, "Some providers may not support the latest Codex version or all features. Test the selected model before use."), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        HorizontalDivider()
+                    }
                     OutlinedTextField(name, { name = it }, enabled = !busy, label = { Text(uiText(R.string.ui_281, "Provider name")) }, shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth(), singleLine = true)
                     OutlinedTextField(url, { url = it }, enabled = !busy, label = { Text(uiText(R.string.ui_282, "Base URL")) }, shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth(), singleLine = true)
                     OutlinedTextField(key, { key = it }, enabled = !busy, label = { Text(if (saved == null) uiText(R.string.ui_173, "API key") else uiText(R.string.ui_283, "API key (leave blank to keep)")) }, visualTransformation = PasswordVisualTransformation(), shape = RoundedCornerShape(20.dp), modifier = Modifier.fillMaxWidth(), singleLine = true)

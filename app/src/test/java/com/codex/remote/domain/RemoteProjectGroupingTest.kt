@@ -47,7 +47,7 @@ class RemoteProjectGroupingTest {
         val state = AppUiState(threads = listOf(opened), selectedThreadId = opened.id,
             selectedProjectPath = opened.cwd, timeline = listOf(user), isTurnRunning = true, activeTurnId = "turn-new")
         val refreshed = state.withThreadIndex(emptyList())
-        assertEquals(opened, refreshed.threads.single())
+        assertEquals(opened.copy(status = "active"), refreshed.threads.single())
         assertEquals("new", refreshed.selectedThreadId)
         assertEquals(listOf(user), refreshed.timeline)
         val streaming = refreshed.withStreamDelta("new", "reply", "First ", TimelineKind.AGENT)

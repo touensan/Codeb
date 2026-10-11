@@ -51,6 +51,7 @@ import java.net.URI
 import java.util.Locale
 
 internal val LocalArtifactReader = staticCompositionLocalOf<(suspend (String) -> ByteArray)?> { null }
+internal val LocalFileManager = staticCompositionLocalOf<((String?) -> Unit)?> { null }
 
 internal data class RichPart(val text: String, val kind: String = "markdown", val label: String = "")
 
@@ -69,7 +70,7 @@ internal fun artifactMime(path: String): String = if (path.startsWith("data:")) 
     "ogg" -> "audio/ogg"
     "html", "htm" -> "text/html"
     "md", "markdown" -> "text/markdown"
-    "txt", "json", "csv", "kt", "java", "js", "ts", "py", "xml", "css", "log", "yaml", "yml" -> "text/plain"
+    "txt", "json", "csv", "kt", "java", "js", "ts", "py", "php", "sh", "toml", "xml", "css", "log", "yaml", "yml" -> "text/plain"
     "pdf" -> "application/pdf"
     else -> "application/octet-stream"
 }
@@ -130,6 +131,11 @@ internal fun RichBody(text: String, modifier: Modifier = Modifier, streaming: Bo
             // Very large prose takes proportional reveal time; opening saved replies shows them immediately.
             while (displayed != latest) {
                 val target = latest
+                if (markdownHasTable(target)) {
+                    kotlinx.coroutines.delay(80)
+                    displayed = latest
+                    break
+                }
                 if (!animateUpdates || !ValueAnimator.areAnimatorsEnabled() || !target.startsWith(displayed) || richParts(target).all { it.kind == "preview" }) {
                     displayed = target
                     break
@@ -347,6 +353,7 @@ private fun WebPreview(source: String) {
 private fun ArtifactCard(path: String, label: String) {
     val context = LocalContext.current
     val reader = LocalArtifactReader.current
+    val fileManager=LocalFileManager.current
     val scope = rememberCoroutineScope()
     val mime = remember(path) { artifactMime(path) }
     val remoteUrl = runCatching { URI(path) }.getOrNull()?.scheme == "https"
@@ -392,7 +399,10 @@ private fun ArtifactCard(path: String, label: String) {
         val inlineRemote = remoteUrl && (mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/"))
         if (inlineRemote) MediaPreview(path, mime)
         else {
-            TextButton(onClick = { load = true; error = null }) { Text(name) }
+            TextButton(onClick = {
+                if(fileManager!=null&&!remoteUrl&&!path.startsWith("data:")) fileManager(if(path.startsWith("sandbox:")||path.startsWith("file:"))URI(path).path else path)
+                else {load=true;error=null}
+            }) { Text(name) }
             if (load && bytes == null && error == null) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
             bytes?.let { content ->
                 when {
@@ -415,6 +425,17 @@ private fun MediaPreview(url: String, mime: String) {
     val escaped = url.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "&lt;")
     val tag = if (mime.startsWith("video/")) "video" else if (mime.startsWith("audio/")) "audio" else "img"
     InlinePreview("<style>body{margin:0}img,video{max-width:100%;max-height:290px}audio{width:100%}</style><$tag src=\"$escaped\" controls playsinline referrerpolicy=\"no-referrer\" ${if (tag == "img") "alt=\"Image\"" else ""}>")
+}
+
+@Composable
+internal fun FileContentPreview(name: String, bytes: ByteArray, text: String?) {
+    val mime=artifactMime(name)
+    when {
+        text!=null -> CodePreview(text, if(mime=="text/markdown") "markdown" else name.substringAfterLast('.',"text"),initialPreview=mime=="text/markdown")
+        mime=="application/pdf" -> PdfPreview(bytes)
+        mime.startsWith("image/") -> MediaPreview("data:$mime;base64,"+Base64.encodeToString(bytes,Base64.NO_WRAP),mime)
+        else -> Text(uiText(R.string.file_binary,"Binary file; export to open in another app."))
+    }
 }
 
 @Composable

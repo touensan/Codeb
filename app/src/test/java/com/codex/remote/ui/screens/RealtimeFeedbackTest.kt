@@ -7,6 +7,20 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class RealtimeFeedbackTest {
+    @Test fun liveTaskStatusSurvivesAnIdleIndexAndClearsAfterCompletionOrStop() {
+        val idle = RemoteThread("a", "A", "/work", 1, "idle")
+        val other = idle.copy(id = "b")
+        val active = AppUiState(threads = listOf(idle, other), selectedThreadId = "a")
+            .withTurnRunning("a", null, true, 1000, 2000)
+        assertEquals("active", active.threads.first().status)
+        val refreshed = active.withThreadIndex(listOf(idle, other))
+        assertEquals("active", refreshed.projects.single().threads.first().status)
+        assertEquals("active", refreshed.copy(selectedThreadId = "b", isTurnRunning = false)
+            .withThreadIndex(listOf(idle, other), setOf("a")).threads.first().status)
+        val completed = refreshed.withTurnRunning("a", "turn", false, 2000, 3000)
+        assertEquals("idle", completed.withThreadIndex(listOf(idle, other)).threads.first().status)
+        assertEquals("idle", active.copy(stopRequested = true).withThreadIndex(listOf(idle)).threads.single().status)
+    }
     @Test fun newDirectoryNamesStayWithinTheSelectedParentAndOldRepliesHaveNoInventedTime() {
         val child = ::remoteDirectoryChildPath
         assertEquals("/work/新项目", child("/work/", "新项目"))

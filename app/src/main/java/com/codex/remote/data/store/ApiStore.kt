@@ -31,6 +31,7 @@ data class ApiProvider(
     val models: List<ApiModel> = emptyList(),
     val selectedModel: String = "",
     val effort: String = "",
+    val enabled: Boolean = true,
 )
 
 @Serializable
@@ -54,6 +55,8 @@ data class LocalConversation(
     val archived: Boolean = false,
     val draft: String = "",
     val attachments: List<LocalAttachment> = emptyList(),
+    val queuedMessages: List<LocalMessage> = emptyList(),
+    val queuePaused: Boolean = false,
     val compactedInput: JsonArray? = null,
     val compactedCount: Int = 0,
     val compactedProvider: String = "",

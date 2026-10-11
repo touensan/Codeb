@@ -13,6 +13,7 @@ import com.codex.remote.domain.ThreadGoal
 import com.codex.remote.domain.ThreadGoalStatus
 import com.codex.remote.domain.withThreadArchived
 import com.codex.remote.domain.withThreadRenamed
+import com.codex.remote.domain.withTurnRunning
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -20,6 +21,12 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ComposerStateTest {
+    @Test fun stoppedTurnCannotBeRevivedByDelayedNotifications() {
+        val stopped = AppUiState(selectedThreadId = "thread", stopRequested = true)
+        assertEquals(stopped, stopped.withTurnRunning("thread", "late-turn", true, 10, 20))
+        assertFalse(stopped.isTurnRunning)
+        assertTrue(stopped.copy(stopRequested = false).withTurnRunning("thread", "new-turn", true, 10, 20).isTurnRunning)
+    }
     @Test
     fun optionalRpcMethodDetectionOnlyIgnoresMissingCapabilities() {
         assertTrue(RpcException("Method not found", -32601).isUnsupportedRpcMethod("account/rateLimits/read"))

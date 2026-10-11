@@ -79,7 +79,7 @@ class LocalViewModel @JvmOverloads constructor(application: Application, private
         viewModelScope.launch {
             try {
                 val providers = withContext(Dispatchers.IO) { store.providers() }
-                updateState { it.copy(providers = providers, providerId = it.providerId.takeIf { id -> providers.any { p -> p.id == id } } ?: providers.firstOrNull()?.id.orEmpty()) }
+                updateState { it.copy(providers = providers, providerId = it.providerId.takeIf { id -> providers.any { p -> p.id == id && p.enabled } } ?: providers.firstOrNull { p -> p.enabled }?.id.orEmpty()) }
                 refresh()
             } catch (error: Exception) { failure(error) }
         }
@@ -140,6 +140,11 @@ class LocalViewModel @JvmOverloads constructor(application: Application, private
         updateState { it.copy(selected = LocalConversation(title = title.ifBlank { uiText(R.string.ui_259, "New chat") }, providerId = it.providerId, lastOpenedAt = nextOpenedAt()), files = emptyList(), error = null) }
     }
 
+    fun conversationFiles(): com.codex.remote.data.local.PhoneFiles {
+        if (_state.value.selected == null) newConversation()
+        return com.codex.remote.data.local.PhoneFiles(getApplication(),store.artifacts(_state.value.selected!!.id).path)
+    }
+
     fun open(conversation: LocalConversation) {
         preserveSelection()
         workspace = conversation.workspace
@@ -152,8 +157,18 @@ class LocalViewModel @JvmOverloads constructor(application: Application, private
 
     fun provider(id: String) {
         if (_state.value.sending) return
+        if (id.isNotEmpty() && _state.value.providers.none { it.id == id && it.enabled }) return
         preferences.edit().putString("provider", id).apply()
         updateState { it.copy(providerId = id, selected = it.selected?.copy(providerId = id, model = "", effort = null)) }
+    }
+
+    fun enableProvider(id: String, enabled: Boolean) = viewModelScope.launch {
+        if (_state.value.sending) return@launch
+        try {
+            if (!enabled) {stopModelTests(id);com.codex.remote.data.local.PhoneControl.stop()}
+            mutateProviders { all -> all.map { if (it.id == id) it.copy(enabled = enabled) else it } }
+            if (!enabled && _state.value.providerId == id) provider(_state.value.providers.firstOrNull { it.enabled }?.id.orEmpty())
+        } catch (error: Exception) { failure(error) }
     }
 
     fun saveProvider(original: ApiProvider?, name: String, baseUrl: String, key: String, protocol: ApiProtocol, models: List<ApiModel>, model: String, effort: String, onSaved: (ApiProvider) -> Unit) = viewModelScope.launch {
@@ -172,9 +187,11 @@ class LocalViewModel @JvmOverloads constructor(application: Application, private
                     protocol = protocol,
                     models = models.map { configured -> configured.copy(test = configured.test.takeIf { original?.baseUrl == url && original.protocol == protocol && key.isBlank() }) },
                     selectedModel = model.trim(), effort = effort.trim(),
+                    enabled = original?.enabled ?: true,
                 )
             }
             mutateProviders { it.filterNot { p -> p.id == saved.id } + saved }
+            com.codex.remote.data.local.PhoneControl.stop()
             if (_state.value.providerId != saved.id) provider(saved.id)
             onSaved(saved)
         } catch (error: Exception) { failure(error) }
@@ -265,52 +282,97 @@ class LocalViewModel @JvmOverloads constructor(application: Application, private
         updateState { it.copy(selected = it.selected?.copy(draft = text)) }
     }
 
-    fun send() {
+    fun send(steer: Boolean = false) {
         val snapshot = _state.value
-        if (snapshot.sending) return
         val conversation = snapshot.selected ?: return
         val prompt = conversation.draft.trim()
         if (prompt.isEmpty() && conversation.attachments.isEmpty()) return
-        val provider = snapshot.providers.firstOrNull { it.id == snapshot.providerId }?.resolved(catalogStore.cached(), conversation) ?: run {
+        val message = LocalMessage(role = "user", text = prompt, attachments = conversation.attachments)
+        if (snapshot.sending && !steer) {
+            updateConversation(conversation.id) { it.copy(queuedMessages = it.queuedMessages + message, draft = "", attachments = emptyList()) }
+            preserveSelection()
+            return
+        }
+        if (snapshot.sending) stop()
+        startReply(conversation.id, message)
+    }
+
+    fun deleteQueuedMessage(id: String) {
+        val conversation = _state.value.selected ?: return
+        updateConversation(conversation.id) { it.copy(queuedMessages = it.queuedMessages.filterNot { message -> message.id == id }) }
+        preserveSelection()
+    }
+
+    fun steerQueuedMessage(id: String) {
+        val conversation = _state.value.selected ?: return
+        val message = conversation.queuedMessages.firstOrNull { it.id == id } ?: return
+        if (_state.value.sending) stop()
+        startReply(conversation.id, message)
+    }
+
+    private fun startReply(id: String, message: LocalMessage) {
+        val snapshot = _state.value
+        val conversation = snapshot.selected?.takeIf { it.id == id } ?: snapshot.conversations.firstOrNull { it.id == id } ?: return
+        if (id in snapshot.runningConversationIds) return
+        val provider = snapshot.providers.firstOrNull { it.id == conversation.providerId.ifBlank { snapshot.providerId } && it.enabled }?.resolved(catalogStore.cached(), conversation) ?: run {
             updateState { it.copy(error = uiText(R.string.ui_292, "Add an API provider first")) }; return
         }
         val reply = LocalMessage(role = "assistant", text = "")
         val outgoing = conversation.copy(
             revision = conversation.revision + 1,
-            title = if (conversation.messages.none { it.role == "user" }) prompt.ifBlank { conversation.attachments.first().name }.take(80) else conversation.title,
+            title = if (conversation.messages.none { it.role == "user" }) message.text.ifBlank { message.attachments.first().name }.take(80) else conversation.title,
             providerId = provider.id,
             model = provider.selectedModel, effort = provider.effort,
-            messages = conversation.messages + LocalMessage(role = "user", text = prompt, attachments = conversation.attachments) + reply,
-            updatedAt = System.currentTimeMillis(), draft = "", attachments = emptyList(),
+            messages = conversation.messages.filterNot { it.role == "assistant" && it.text.isBlank() } + message + reply,
+            updatedAt = System.currentTimeMillis(),
+            draft = conversation.draft.takeUnless { it.trim() == message.text && conversation.attachments == message.attachments }.orEmpty(),
+            attachments = if (conversation.attachments == message.attachments) emptyList() else conversation.attachments,
+            queuedMessages = conversation.queuedMessages.filterNot { it.id == message.id }, queuePaused = false,
         )
-        updateState { it.copy(selected = outgoing, runningConversationIds = it.runningConversationIds + outgoing.id, error = null) }
-        requestJobs[outgoing.id] = viewModelScope.launch {
+        updateConversation(id) { outgoing }
+        updateState { it.copy(runningConversationIds = it.runningConversationIds + id, error = null) }
+        requestJobs[id] = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            val owner = currentCoroutineContext().job
+            var completed = false
             try {
                 withContext(Dispatchers.IO) { store.save(outgoing) }
                 val useCompact = outgoing.compactedProvider == provider.id && outgoing.compactedModel == provider.selectedModel && provider.protocol == ApiProtocol.RESPONSES
                 val messages = outgoing.messages.dropLast(1).drop(if (useCompact) outgoing.compactedCount else 0)
                 client.stream(provider, withContext(Dispatchers.IO) { store.key(provider) }, messages, if (useCompact) outgoing.compactedInput else null) { delta ->
-                    updateConversation(outgoing.id) { it.copy(messages = it.messages.map { message -> if (message.id == reply.id) message.copy(text = message.text + delta) else message }) }
+                    if (owner.isActive && requestJobs[id] === owner) updateConversation(id) { it.copy(messages = it.messages.map { message -> if (message.id == reply.id) message.copy(text = message.text + delta) else message }) }
                 }
+                completed = true
             } catch (error: CancellationException) {
-                if (_state.value.selected?.id == outgoing.id) updateState { it.copy(error = uiText(R.string.ui_350, "Stopped; partial reply was kept")) }
                 throw error
-            } catch (error: Exception) { conversationFailure(outgoing.id, error) }
+            } catch (error: Exception) { if (requestJobs[id] === owner) conversationFailure(id, error) }
             finally {
-                updateConversation(outgoing.id) { it.copy(messages = it.messages.map { message ->
+                if (requestJobs[id] === owner) {
+                updateConversation(id) { it.copy(queuePaused = !completed, messages = it.messages.map { message ->
                     if (message.id == reply.id && message.text.isNotBlank()) message.copy(completedAt = System.currentTimeMillis()) else message
                 }) }
-                finishRequest(outgoing.id)
-                refresh()
+                finishRequest(id, owner)
+                val latest = _state.value.selected?.takeIf { it.id == id } ?: _state.value.conversations.firstOrNull { it.id == id }
+                if (completed && latest?.queuePaused == false) latest.queuedMessages.firstOrNull()?.let { startReply(id, it) }
+                }
             }
-        }
+        }.also { it.start() }
     }
 
-    fun stop() { _state.value.selected?.id?.let { requestJobs[it]?.cancel() } }
+    fun stop() {
+        val conversation = _state.value.selected ?: return
+        val job = requestJobs.remove(conversation.id)
+        updateConversation(conversation.id) { it.copy(queuePaused = true, messages = it.messages.map { message ->
+            if (message.role == "assistant" && message.completedAt == null && message.text.isNotBlank()) message.copy(completedAt = System.currentTimeMillis()) else message
+        }) }
+        updateState { it.copy(runningConversationIds = it.runningConversationIds - conversation.id, error = null) }
+        // ponytail: old HTTP streams may unwind slowly; only the current job may publish or finish a reply.
+        job?.cancel()
+        preserveSelection()
+    }
     fun compact() {
         val snapshot = _state.value
         val conversation = snapshot.selected ?: return
-        val provider = snapshot.providers.firstOrNull { it.id == snapshot.providerId }?.resolved(catalogStore.cached(), conversation) ?: return
+        val provider = snapshot.providers.firstOrNull { it.id == snapshot.providerId && it.enabled }?.resolved(catalogStore.cached(), conversation) ?: return
         if (snapshot.sending || conversation.messages.isEmpty()) return
         updateState { it.copy(runningConversationIds = it.runningConversationIds + conversation.id, error = null) }
         requestJobs[conversation.id] = viewModelScope.launch {
@@ -327,7 +389,7 @@ class LocalViewModel @JvmOverloads constructor(application: Application, private
     fun generateImage() {
         val snapshot = _state.value
         val conversation = snapshot.selected?.takeIf { it.workspace && it.draft.isNotBlank() } ?: return
-        val provider = snapshot.providers.firstOrNull { it.id == snapshot.providerId } ?: return
+        val provider = snapshot.providers.firstOrNull { it.id == snapshot.providerId && it.enabled } ?: return
         if (snapshot.sending) return
         updateState { it.copy(runningConversationIds = it.runningConversationIds + conversation.id, error = null) }
         requestJobs[conversation.id] = viewModelScope.launch {
@@ -390,7 +452,7 @@ class LocalViewModel @JvmOverloads constructor(application: Application, private
                     }
                 }
             }
-            updateState { state -> if (state.selected?.id != id || state.sending || state.selected.attachments.size >= 4) state else state.copy(selected = state.selected.copy(attachments = state.selected.attachments + attachment)) }
+            updateState { state -> if (state.selected?.id != id || state.selected.attachments.size >= 4) state else state.copy(selected = state.selected.copy(attachments = state.selected.attachments + attachment)) }
         } catch (error: Exception) { failure(error) }
     }
 
@@ -485,12 +547,14 @@ class LocalViewModel @JvmOverloads constructor(application: Application, private
             conversations = if (current.conversations.any { it.id == id }) current.conversations.map { if (it.id == id) next else it } else listOf(next) + current.conversations)
     }
 
-    private suspend fun finishRequest(id: String) {
+    private suspend fun finishRequest(id: String, requestOwner: Job? = null) {
+        val owner = requestOwner ?: currentCoroutineContext().job
         withContext(NonCancellable) {
+            if (requestJobs[id] !== owner) return@withContext
+            requestJobs.remove(id, owner)
+            updateState { it.copy(runningConversationIds = it.runningConversationIds - id) }
             val saved = _state.value.selected?.takeIf { it.id == id } ?: _state.value.conversations.firstOrNull { it.id == id }
             if (saved != null) runCatching { withContext(Dispatchers.IO) { store.save(saved) } }.onFailure { conversationFailure(id, it) }
-            requestJobs.remove(id)
-            updateState { it.copy(runningConversationIds = it.runningConversationIds - id) }
         }
     }
 

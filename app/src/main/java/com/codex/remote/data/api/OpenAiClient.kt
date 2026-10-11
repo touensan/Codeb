@@ -10,6 +10,8 @@ import com.codex.remote.data.store.ApiProvider
 import com.codex.remote.data.store.LocalMessage
 import com.codex.remote.data.store.validateApiBaseUrl
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -71,10 +73,18 @@ open class OpenAiClient {
         }
     }
 
+    suspend fun testImage(provider: ApiProvider, key: String, image: String): String {
+        val body=JsonObject(requestBody(provider.copy(effort=""),listOf(LocalMessage(role="user",
+            text="Read the six digits shown in the image. Reply with those six digits only.",
+            attachments=listOf(com.codex.remote.data.store.LocalAttachment(name="capability-check.png",kind="image",data=image))))) +
+            mapOf("stream" to JsonPrimitive(false), (if(provider.protocol==ApiProtocol.RESPONSES) "max_output_tokens" else "max_completion_tokens") to JsonPrimitive(1024)))
+        return responseText(requestJson(provider,key,if(provider.protocol==ApiProtocol.RESPONSES) "responses" else "chat/completions",body))
+    }
+
     private suspend fun requestJson(provider: ApiProvider, key: String, path: String, body: JsonObject): JsonObject = withContext(Dispatchers.IO) {
         suspendCancellableCoroutine { continuation ->
             val connection = open(provider, key, path)
-            continuation.invokeOnCancellation { connection.disconnect() }
+            continuation.invokeOnCancellation { CoroutineScope(Dispatchers.IO).launch { connection.disconnect() } }
             try {
                 connection.requestMethod = "POST"
                 connection.doOutput = true
@@ -93,7 +103,7 @@ open class OpenAiClient {
         suspendCancellableCoroutine<Unit> { continuation ->
         val connection = open(provider, key, if (provider.protocol == ApiProtocol.RESPONSES) "responses" else "chat/completions")
         // Disconnect blocked reads immediately on cancellation, instead of waiting for the socket timeout.
-        continuation.invokeOnCancellation { connection.disconnect() }
+        continuation.invokeOnCancellation { CoroutineScope(Dispatchers.IO).launch { connection.disconnect() } }
         try {
             connection.requestMethod = "POST"
             connection.doOutput = true

@@ -4,7 +4,7 @@
 
 Please report vulnerabilities privately through GitHub Security Advisories:
 
-https://github.com/liuaho6-commits/codex-remote-android/security/advisories/new
+[Report a vulnerability](https://github.com/touensan/Codeb/security/advisories/new)
 
 Do not open a public issue for credentials, authentication bypasses, host-key
 verification problems, or other vulnerabilities that could put users at risk.

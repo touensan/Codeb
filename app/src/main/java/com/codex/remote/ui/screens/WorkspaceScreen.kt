@@ -1,10 +1,13 @@
 package com.codex.remote.ui.screens
+import androidx.compose.runtime.collectAsState
+import androidx.compose.material3.FilterChip
 
 import com.codex.remote.R
 import com.codex.remote.ui.uiText
 import com.codex.remote.ui.displayEffort
 import com.codex.remote.ui.ModelConfigurationMenu
 
+import androidx.compose.animation.togetherWith
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Sort
 import androidx.compose.material.icons.outlined.EditNote
@@ -239,6 +242,9 @@ fun WorkspaceScreen(
     onDeleteArchivedThread: (RemoteThread) -> Unit,
     onSetThreadPinned: (RemoteThread, Boolean) -> Unit,
     onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>, Boolean) -> Unit,
+    onQueue: (String, List<ComposerMention>, List<ComposerImageAttachment>) -> Unit = { _,_,_ -> },
+    onDeleteQueued: (String) -> Unit = {},
+    onSteerQueued: (String) -> Unit = {},
     onStop: () -> Unit,
     onCompactThread: () -> Unit,
     onForkThread: () -> Unit,
@@ -282,6 +288,8 @@ fun WorkspaceScreen(
     var deleteArchivedTarget by remember { mutableStateOf<RemoteThread?>(null) }
     var showAccountStatus by remember { mutableStateOf(false) }
     var showingTasks by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(startOnTasksPage) }
+    val returnToChat by com.codex.remote.data.local.PhoneControl.returnToChat.collectAsState()
+    LaunchedEffect(returnToChat){if(returnToChat>0&&state.activeConnection?.localAccess!=null&&state.selectedThreadId!=null)showingTasks=false}
     var openingProject by remember { mutableStateOf(false) }
     var switchingProject by remember { mutableStateOf(false) }
     val openProject = {
@@ -300,7 +308,7 @@ fun WorkspaceScreen(
                     }.testTag("switch-project-${project.path}").padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text(project.name)
-                            Text(project.path, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(com.codex.remote.data.local.shortPhonePath(project.path), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         if (project.path == state.selectedProjectPath) Icon(Icons.Outlined.Check, null)
                     }
@@ -363,6 +371,7 @@ fun WorkspaceScreen(
                     showMenu = false,
                     onMenu = {},
                     onSend = onSend,
+                    onQueue = onQueue, onDeleteQueued = onDeleteQueued, onSteerQueued = onSteerQueued,
                     onStop = onStop,
                     onLoadOlderHistory = onLoadOlderHistory,
                     onCompactThread = onCompactThread,
@@ -418,7 +427,11 @@ fun WorkspaceScreen(
                     }
                 },
             ) {
-                if (showingTasks) WorkspaceSidebar(
+                androidx.compose.animation.AnimatedContent(targetState=showingTasks, label="workspace-navigation",
+                    transitionSpec={ (androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(160)) +
+                        androidx.compose.animation.slideInHorizontally(androidx.compose.animation.core.tween(200)){if(targetState)-it/12 else it/12}) togetherWith
+                        androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(100)) }) { tasksPage ->
+                if (tasksPage) WorkspaceSidebar(
                             state = state,
                             navigation = {},
                             pageHeader = hostSelector,
@@ -462,6 +475,7 @@ fun WorkspaceScreen(
                     showMenu = true,
                     onMenu = { showingTasks = true },
                     onSend = onSend,
+                    onQueue = onQueue, onDeleteQueued = onDeleteQueued, onSteerQueued = onSteerQueued,
                     onStop = onStop,
                     onLoadOlderHistory = onLoadOlderHistory,
                     onCompactThread = onCompactThread,
@@ -494,6 +508,7 @@ fun WorkspaceScreen(
                     modifier = Modifier.fillMaxSize(),
                 )
             }
+        }
         }
     }
 
@@ -716,6 +731,10 @@ private fun WorkspaceSidebar(
                                 overflow = TextOverflow.Ellipsis,
                             )
                         }
+                        if (project.threads.any { it.status.equals("active", true) || it.status.equals("running", true) || it.status.equals("inProgress", true) }) {
+                            CircularProgressIndicator(Modifier.size(15.dp).testTag("project-running-${project.id}"), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                        }
                         Text(
                             project.threads.size.toString(),
                             style = MaterialTheme.typography.labelSmall,
@@ -874,7 +893,9 @@ private fun ThreadActionsMenu(
     isPinned: Boolean? = null,
     onSetPinned: (Boolean) -> Unit = {},
 ) {
+    val openFiles=LocalFileManager.current
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        if(openFiles!=null) DropdownMenuItem(text={Text(uiText(R.string.file_manager,"Files"))},leadingIcon={Icon(Icons.Outlined.FolderOpen,null)},onClick={onDismiss();openFiles(null)},modifier=Modifier.testTag("workspace-files-menu"))
         DropdownMenuItem(
             text = { Text(uiText(R.string.ui_066, "Rename")) },
             leadingIcon = { Icon(Icons.Outlined.Edit, contentDescription = null) },
@@ -938,6 +959,9 @@ private fun WorkspaceContent(
     showMenu: Boolean,
     onMenu: () -> Unit,
     onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>, Boolean) -> Unit,
+    onQueue: (String, List<ComposerMention>, List<ComposerImageAttachment>) -> Unit,
+    onDeleteQueued: (String) -> Unit,
+    onSteerQueued: (String) -> Unit,
     onStop: () -> Unit,
     onLoadOlderHistory: () -> Unit,
     onCompactThread: () -> Unit,
@@ -1060,6 +1084,7 @@ private fun WorkspaceContent(
                         Composer(
                             state = state,
                             onSend = { text, mentions, images, goal -> followLatest = true; onSend(text, mentions, images, goal) },
+                            onQueue = onQueue, onDeleteQueued = onDeleteQueued, onSteerQueued = onSteerQueued,
                             onStop = onStop,
                             onCompactThread = onCompactThread,
                             onForkThread = onForkThread,
@@ -1347,7 +1372,7 @@ private fun Conversation(
     val expandedActivity = remember(conversationKey) { mutableStateMapOf<String, Boolean>() }
     val visibleTimeline = presentationTimeline.filter { row ->
         row.item.kind == TimelineKind.USER || row.isTurnReply || row.startsActivity ||
-            (expandedActivity[row.turnKey] ?: (state.isTurnRunning && row.turnKey == presentationTimeline.lastOrNull()?.turnKey)) || row.turnElapsedMs == null
+            (expandedActivity[row.turnKey] ?: false) || row.turnElapsedMs == null
     }
     val dragged by listState.interactionSource.collectIsDraggedAsState()
     var pendingHistoryAnchor by remember(conversationKey) { mutableStateOf<HistoryScrollAnchor?>(null) }
@@ -1402,7 +1427,7 @@ private fun Conversation(
                 )
                 Spacer(Modifier.height(5.dp))
                 Text(
-                    project?.path.orEmpty(),
+                    com.codex.remote.data.local.shortPhonePath(project?.path.orEmpty()),
                     style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1578,7 +1603,7 @@ private fun Conversation(
         }
             items(visibleTimeline, key = { it.item.id }) { presentation ->
                 val running = state.isTurnRunning && presentation.turnKey == presentationTimeline.lastOrNull()?.turnKey
-                val expanded = expandedActivity[presentation.turnKey] ?: running
+                val expanded = expandedActivity[presentation.turnKey] ?: false
                 Column {
                 if (presentation.startsActivity && (presentation.turnElapsedMs != null || running)) {
                     TurnDuration(presentation.turnElapsedMs, if (running) state.turnStartedAt else 0,
@@ -1833,10 +1858,7 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier, footerFiles: Lis
 
 @Composable
 private fun FileChangesTool(item: TimelineItem, modifier: Modifier, summary: Boolean = false) {
-    var expanded by remember(item.id) { mutableStateOf(item.status.isTimelineItemRunning()) }
-    LaunchedEffect(item.id, item.status) {
-        expanded = item.status.isTimelineItemRunning()
-    }
+    var expanded by remember(item.id) { mutableStateOf(false) }
     val counts = item.fileChanges.fold(0 to 0) { total, change ->
         val changeCounts = diffLineCounts(change.diff)
         total.first + changeCounts.first to total.second + changeCounts.second
@@ -1992,10 +2014,7 @@ private fun ExpandableTool(
     autoCollapseOnComplete: Boolean = false,
 ) {
     var expanded by remember(expansionKey) {
-        mutableStateOf(autoCollapseOnComplete && status.isTimelineItemRunning())
-    }
-    LaunchedEffect(expansionKey, status, autoCollapseOnComplete) {
-        if (autoCollapseOnComplete) expanded = status.isTimelineItemRunning()
+        mutableStateOf(false)
     }
     Surface(
         modifier = modifier.animateContentSize().testTag("timeline-tool-$expansionKey"),
@@ -2060,6 +2079,17 @@ internal fun String.isTimelineItemRunning(): Boolean =
 
 @Composable
 internal fun MarkdownBody(text: String, modifier: Modifier = Modifier, streaming: Boolean = false, plainText: Boolean = false, onDisplayed: (String) -> Unit = {}) {
+    val tableParts = remember(text,plainText) { if(plainText) emptyList() else markdownTableParts(text) }
+    if(tableParts.any {it.rows!=null}) {
+        Column(modifier.fillMaxWidth()) {
+            tableParts.forEach { part ->
+                if(part.rows!=null) MarkdownTable(part.rows)
+                else MarkdownBody(part.source,streaming=streaming)
+            }
+        }
+        LaunchedEffect(text) {withFrameNanos { };onDisplayed(text)}
+        return
+    }
     val context = LocalContext.current
     val density = LocalDensity.current
     val latexTextSize = with(density) { MaterialTheme.typography.bodyLarge.fontSize.toPx() }
@@ -2068,7 +2098,6 @@ internal fun MarkdownBody(text: String, modifier: Modifier = Modifier, streaming
             .usePlugin(MarkwonInlineParserPlugin.create())
             .usePlugin(JLatexMathPlugin.create(latexTextSize) { builder -> builder.inlinesEnabled(true) })
             .usePlugin(StrikethroughPlugin.create())
-            .usePlugin(TablePlugin.create(context))
             .usePlugin(object : io.noties.markwon.AbstractMarkwonPlugin() {
                 override fun configureConfiguration(builder: io.noties.markwon.MarkwonConfiguration.Builder) {
                     builder.linkResolver { view, link ->
@@ -2094,12 +2123,12 @@ internal fun MarkdownBody(text: String, modifier: Modifier = Modifier, streaming
     // ponytail: static replies parse once before measurement; live deltas still parse on a worker.
     // Huge static documents can block a frame; cache their worker-parsed result upstream if needed.
     val staticContent = if (!streaming) remember(markwon, rendered, plainText) {
-        if (plainText) android.text.SpannableStringBuilder(rendered) else markwon.toMarkdown(rendered)
+        if (plainText) android.text.SpannableStringBuilder(rendered) else synchronized(markwon) { markwon.toMarkdown(rendered) }
     } else null
     LaunchedEffect(markwon, streaming, plainText) {
         if (!streaming) return@LaunchedEffect
         snapshotFlow { latestRendered }.conflate().collect { markdown ->
-            parsed = markdown to kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { markwon.toMarkdown(markdown) }
+            parsed = markdown to kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { synchronized(markwon) { markwon.toMarkdown(markdown) } }
         }
     }
     AndroidView(
@@ -2206,6 +2235,9 @@ private fun String.isEscapedAt(index: Int): Boolean {
 private fun Composer(
     state: AppUiState,
     onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>, Boolean) -> Unit,
+    onQueue: (String, List<ComposerMention>, List<ComposerImageAttachment>) -> Unit,
+    onDeleteQueued: (String) -> Unit,
+    onSteerQueued: (String) -> Unit,
     onStop: () -> Unit,
     onCompactThread: () -> Unit,
     onForkThread: () -> Unit,
@@ -2231,6 +2263,7 @@ private fun Composer(
     sendEnabled: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
+    var queueMode by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(true) }
     val draftContext = LocalContext.current
     val draftStore = remember(draftContext) { com.codex.remote.data.store.LocalStore(draftContext) }
     val draftHost = state.activeConnection?.id.orEmpty()
@@ -2248,7 +2281,7 @@ private fun Composer(
     SideEffect { if (draftKey == "project:") pendingDraft.value = text }
     val latestDraft by rememberUpdatedState(text.text)
     LaunchedEffect(state.failedSend?.itemId) {
-        state.failedSend?.takeIf { failed -> state.timeline.any { it.id == failed.itemId } }?.let { failed ->
+        state.failedSend?.takeIf { failed -> failed.itemId.startsWith("queue-failed-") || state.timeline.any { it.id == failed.itemId } }?.let { failed ->
             if (text.text.isBlank()) text = TextFieldValue(failed.text)
         }
     }
@@ -2260,6 +2293,9 @@ private fun Composer(
     }
     var selectedMentions by remember(state.selectedThreadId) { mutableStateOf(emptyList<ComposerMention>()) }
     var attachments by remember(state.selectedThreadId) { mutableStateOf(emptyList<ComposerImageAttachment>()) }
+    LaunchedEffect(state.failedSend?.itemId) {
+        state.failedSend?.takeIf {it.itemId.startsWith("queue-failed-")}?.let { selectedMentions=it.mentions;attachments=it.attachments }
+    }
     var attachmentError by remember(state.selectedThreadId) { mutableStateOf<String?>(null) }
     var mentionKindFilter by remember(state.selectedThreadId) { mutableStateOf<ComposerMentionKind?>(null) }
     var modelSettingsMenu by remember(state.selectedThreadId) { mutableStateOf(false) }
@@ -2284,7 +2320,9 @@ private fun Composer(
     val keyboardController = LocalSoftwareKeyboardController.current
     val density = LocalDensity.current
     val isKeyboardVisible = WindowInsets.ime.getBottom(density) > 0
-    val composerMenuProperties = remember { PopupProperties(focusable = false) }
+    val composerMenuProperties = remember(state.activeConnection?.localAccess) {
+        PopupProperties(focusable = state.activeConnection?.localAccess != null)
+    }
     val selectedModel = state.models.firstOrNull { it.id == state.selectedModel }
     val selectedServiceTier = selectedModel?.serviceTiers?.firstOrNull { it.id == state.selectedServiceTier }
     val supportsImages = selectedModel?.inputModalities?.any { it.equals("image", true) } == true
@@ -2501,14 +2539,33 @@ private fun Composer(
                     onClear = onClearGoal,
                 )
             }
+            state.queueMessages.forEach { (id,message) ->
+                Surface(Modifier.fillMaxWidth().widthIn(max=860.dp).padding(horizontal=12.dp,vertical=3.dp).testTag("queued-$id"),
+                    shape=RoundedCornerShape(12.dp),color=MaterialTheme.colorScheme.surfaceContainerHigh) {
+                    Row(Modifier.padding(start=12.dp),verticalAlignment=Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f).padding(vertical=8.dp)) {
+                            Text(uiText(R.string.queued_message,"Queued"),style=MaterialTheme.typography.labelSmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(message,maxLines=3,overflow=TextOverflow.Ellipsis,style=MaterialTheme.typography.bodySmall)
+                        }
+                        TextButton(onClick={onSteerQueued(id)},enabled=state.queueActionId==null,modifier=Modifier.testTag("steer-queued-$id")) {
+                            Text(uiText(if(state.queueActionId==id) R.string.queue_sending else R.string.send_steer,"Steer now"))
+                        }
+                        IconButton(onClick={onDeleteQueued(id)},enabled=state.queueActionId==null){Icon(Icons.Outlined.Close,uiText(R.string.ui_161,"Delete"))}
+                    }
+                }
+            }
             Surface(
                 modifier = Modifier.fillMaxWidth().widthIn(max = 860.dp).padding(horizontal = 12.dp, vertical = 8.dp),
                 shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha=0.4f)),
                 shadowElevation = 0.dp,
             ) {
-                Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                    if(state.isTurnRunning && (text.text.isNotBlank() || attachments.isNotEmpty())) Row(verticalAlignment=Alignment.CenterVertically, horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                        FilterChip(selected=!queueMode,onClick={queueMode=false},label={Text(uiText(R.string.send_steer,"Steer"))},modifier=Modifier.testTag("send-steer"))
+                        FilterChip(selected=queueMode,onClick={queueMode=true},enabled=state.queueAvailable,label={Text(uiText(R.string.send_queue,"Queue"))},modifier=Modifier.testTag("send-queue"))
+                    }
                     state.failedSend?.takeIf { failed -> state.timeline.any { it.id == failed.itemId && it.status == "sendFailed" } }?.let { failed ->
                         TextButton(onClick = { onSend(failed.text, failed.mentions, failed.attachments, failed.asGoal) }, enabled = sendEnabled && !state.isTurnRunning) {
                             Icon(Icons.Outlined.Refresh, null, Modifier.size(18.dp))
@@ -2655,7 +2712,10 @@ private fun Composer(
                                     insertMention(option)
                                 },
                             )
-                            Box {
+                            if (state.activeConnection?.localAccess != null) {
+                                Text(if (state.activeConnection.localAccess == "root") "Root" else uiText(R.string.local_standard, "Standard"),
+                                    style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(horizontal = 6.dp))
+                            } else Box {
                                 IconButton(
                                     modifier = Modifier.testTag("composer-permissions"),
                                     onClick = { policyMenu = true },
@@ -2729,6 +2789,9 @@ private fun Composer(
                             )
                         }
                         Spacer(Modifier.width(3.dp))
+                        if (state.isTurnRunning && (text.text.isNotBlank() || attachments.isNotEmpty())) IconButton(onClick = onStop, modifier = Modifier.testTag("composer-stop")) {
+                            Icon(Icons.Filled.Stop, uiText(R.string.ui_111, "Stop"))
+                        }
                         Surface(
                             modifier = Modifier.size(42.dp),
                             shape = CircleShape,
@@ -2756,12 +2819,14 @@ private fun Composer(
                                             attachmentError = null
                                             mentionKindFilter = null
                                             goalModeActive = false
-                                            onSend(
+                                            if(state.isTurnRunning && queueMode && !submitAsGoal) onQueue(submittedText,submittedMentions,submittedAttachments)
+                                            else onSend(
                                                 submittedText,
                                                 submittedMentions,
                                                 submittedAttachments,
                                                 submitAsGoal,
                                             )
+                                            queueMode = true
                                         }
                                     }
                                 },
@@ -2769,13 +2834,13 @@ private fun Composer(
                                     text.text.isNotBlank() && !state.isTurnRunning && !state.isGoalLoading
                                 } else {
                                     (text.text.isNotBlank() || attachments.isNotEmpty() || state.isTurnRunning) &&
-                                        (!state.isTurnRunning || state.activeTurnId != null)
+                                        (!state.isTurnRunning || queueMode || state.activeTurnId != null)
                                 },
                                 modifier = Modifier.testTag("composer-send"),
                             ) {
                                 Icon(
                                     if (state.isTurnRunning && text.text.isBlank() && attachments.isEmpty()) Icons.Filled.Stop else Icons.Outlined.ArrowUpward,
-                                    contentDescription = if (state.isTurnRunning && text.text.isBlank()) uiText(R.string.ui_111, "Stop") else if (state.isTurnRunning) uiText(R.string.ui_112, "追加到当前任务") else uiText(R.string.ui_113, "发送"),
+                                    contentDescription = if (state.isTurnRunning && text.text.isBlank()) uiText(R.string.ui_111, "Stop") else if (state.isTurnRunning) uiText(if(queueMode) R.string.send_queue else R.string.send_steer, "Send follow-up") else uiText(R.string.ui_113, "发送"),
                                     tint = MaterialTheme.colorScheme.onPrimary,
                                 )
                             }
