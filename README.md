@@ -12,6 +12,18 @@
 [![Android CI](https://github.com/touensan/Codeb/actions/workflows/android.yml/badge.svg)](https://github.com/touensan/Codeb/actions/workflows/android.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
+## 界面预览
+
+| SSH 远程连接 | API 对话与 SVG 预览 |
+| :---: | :---: |
+| <a href="assets/screenshots/ssh-connection.png"><img src="assets/screenshots/ssh-connection.png" alt="添加 SSH 主机：填写连接信息，选择密码或私钥认证" width="280" /></a> | <a href="assets/screenshots/api-svg-preview.jpg"><img src="assets/screenshots/api-svg-preview.jpg" alt="API 对话中直接预览生成的 SVG，并切换查看源码" width="280" /></a> |
+
+| 本机 Codex 设置 | 手机 Skills 市场 |
+| :---: | :---: |
+| <a href="assets/screenshots/local-codeb-setup.png"><img src="assets/screenshots/local-codeb-setup.png" alt="本机 Codeb 设置：选择权限、供应商和模型，检查 Termux 运行环境" width="280" /></a> | <a href="assets/screenshots/skills-market.png"><img src="assets/screenshots/skills-market.png" alt="Skills 市场：选择运行环境，浏览并安装手机适配技能" width="280" /></a> |
+
+点击图片可查看原图。连接页为模拟器截图，其余为一加 13 真机截图；图片记录不同开发阶段，界面以当前安装版本为准。
+
 ## 可以做什么
 
 - **远程 Codex**：保存多个 SSH 连接，切换已有项目，继续服务器会话，查看历史、活动、命令与文件变更；模型、推理强度及速度选项跟随服务器实际能力。
