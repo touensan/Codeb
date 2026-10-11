@@ -17,6 +17,15 @@ import org.junit.Test
 
 class ContentLayoutDeviceTest {
     @get:Rule val rule=createAndroidComposeRule<ComponentActivity>()
+    @Test fun batchedStreamingTextDoesNotLeaveInvisiblePagesWaitingForCharacterAnimation() {
+        var painted = false
+        val text = "手机执行过程应及时显示。".repeat(180)
+        rule.setContent { CodexRemoteTheme { Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
+            com.codex.remote.ui.screens.MarkdownBody(text, streaming = true, onDisplayed = { painted = true })
+        } } }
+        rule.waitUntil(4_000) { painted }
+        assertTrue(painted)
+    }
     @Test fun streamedTablesKeepRowsAndStableHeightAfterResizingAndCompletion() {
         var body by mutableStateOf("Before\n\n| Name | Purpose | Available |\n| --- | --- | --- |\n")
         var running by mutableStateOf(true)

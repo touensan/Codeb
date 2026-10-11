@@ -50,7 +50,8 @@ fun RemoteWorkspace(viewModel: AppViewModel, onOpenHosts: () -> Unit,
         )
     } else {
         androidx.compose.runtime.CompositionLocalProvider(com.codex.remote.ui.screens.LocalArtifactReader provides { path -> viewModel.readArtifact(path) },
-            com.codex.remote.ui.screens.LocalFileManager provides { path -> filePath=path;filesOpen=true }) {
+            com.codex.remote.ui.screens.LocalFileManager provides { path -> filePath=path;filesOpen=true },
+            com.codex.remote.ui.screens.LocalWorkspaceImporter provides viewModel::importWorkspaceAttachment) {
         WorkspaceScreen(
             state = state,
             startOnTasksPage = true,

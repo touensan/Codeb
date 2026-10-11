@@ -52,6 +52,7 @@ import java.util.Locale
 
 internal val LocalArtifactReader = staticCompositionLocalOf<(suspend (String) -> ByteArray)?> { null }
 internal val LocalFileManager = staticCompositionLocalOf<((String?) -> Unit)?> { null }
+internal val LocalWorkspaceImporter = staticCompositionLocalOf<(suspend (android.net.Uri, Boolean) -> com.codex.remote.domain.ComposerImageAttachment)?> { null }
 
 internal data class RichPart(val text: String, val kind: String = "markdown", val label: String = "")
 
@@ -228,13 +229,17 @@ internal class RevealTextView(context: android.content.Context) : android.widget
             }
             val boundaries = android.icu.text.BreakIterator.getCharacterInstance(Locale.ROOT).apply { setText(next) }
             var start = if (boundaries.isBoundary(previous.length)) previous.length else boundaries.preceding(previous.length)
-            var time = maxOf(now, fadeUntil - 80)
+            // A batched delta must not reserve pages of invisible text for seconds.
+            var time = now
+            val step = minOf(16.0, 180.0 / (next.length - start).coerceAtLeast(1))
+            var offset = 0.0
             while (start < next.length) {
                 val end = boundaries.following(start)
                 if (end == android.icu.text.BreakIterator.DONE) break
                 styled.setSpan(RevealTextSpan(time), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                 start = end
-                time += 16
+                offset += step
+                time = now + offset.toLong()
             }
             fadeUntil = maxOf(fadeUntil, time + 80)
         } else {

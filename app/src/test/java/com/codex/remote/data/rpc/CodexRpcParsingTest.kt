@@ -217,5 +217,21 @@ class CodexRpcParsingTest {
         assertEquals("thread-1", clear["threadId"]?.jsonPrimitive?.content)
     }
 
+    @Test fun contextUsesLatestUsageAndKeepsCumulativeConsumptionSeparate() {
+        val usage = CodexRpcClient.parseThreadTokenUsage(json.parseToJsonElement("""{
+            "total":{"totalTokens":614497,"inputTokens":600000,"outputTokens":14497},
+            "last":{"totalTokens":52000,"inputTokens":51000,"outputTokens":1000},
+            "modelContextWindow":258400
+        }"""))!!
+        assertEquals(614497L, usage.totalTokens)
+        assertEquals(52000L, usage.contextTokens)
+        assertEquals(null, CodexRpcClient.parseThreadTokenUsage(json.parseToJsonElement(
+            """{"total":{"totalTokens":614497},"modelContextWindow":258400}"""
+        ))!!.contextTokens)
+        val command = parse("""{"type":"commandExecution","id":"c","command":"pkg install demo","status":"failed","exitCode":42,"aggregatedOutput":"Package unavailable"}""")!!
+        assertEquals(42L, command.exitCode)
+        assertEquals("Package unavailable", command.body)
+    }
+
     private fun parse(source: String) = CodexRpcClient.parseTimelineItem(json.parseToJsonElement(source))
 }

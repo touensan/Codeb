@@ -44,6 +44,7 @@ function firstLine(stream, limit = 131072) {
 }
 
 async function install() {
+  await installPrerequisites();
   if (fs.existsSync(BIN) && fs.existsSync(path.join(path.dirname(BIN), 'codex-code-mode-host')) && execFileSync(BIN, ['--version'], { timeout: 10000 }).toString().trim() === `codex-cli ${VERSION}`) return;
   fs.mkdirSync(`${BASE}/runtime`, { recursive: true, mode: 0o700 });
   const staging = fs.mkdtempSync(`${BASE}/runtime/install-`);
@@ -76,6 +77,93 @@ async function install() {
   } finally { if (fs.existsSync(staging)) fs.rmSync(staging, { recursive: true }); }
 }
 
+function termuxEnvironment() {
+  const env = { ...process.env, HOME, PREFIX, TMPDIR: `${PREFIX}/tmp`,
+    PATH: `${PREFIX}/bin:/system/bin`, SHELL: `${PREFIX}/bin/bash`,
+    DEBIAN_FRONTEND: 'noninteractive' };
+  const preload = ['libtermux-exec-ld-preload.so', 'libtermux-exec.so']
+    .map(name => `${PREFIX}/lib/${name}`).find(file => fs.existsSync(file));
+  if (preload) env.LD_PRELOAD = preload;
+  return env;
+}
+
+async function installPrerequisites() {
+  if (process.getuid() === 0) throw new Error('Prepare Codeb from the ordinary Termux identity');
+  const packages = ['python', 'python-pip', 'python-bcrypt', 'python-pillow', 'git', 'curl', 'tar', 'unzip', 'zip', 'termux-exec', 'proot-distro'];
+  const missing = packages.filter(name => {
+    try { return execFileSync(`${PREFIX}/bin/dpkg-query`, ['-W', '-f=${Status}', name], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() !== 'install ok installed'; }
+    catch { return true; }
+  });
+  if (!missing.length) return;
+  fs.mkdirSync(BASE, { recursive: true, mode: 0o700 });
+  const stage = `${BASE}/setup-stage`;
+  fs.writeFileSync(stage, 'dependencies', { mode: 0o600 });
+  // An isolated source list avoids a stale user-selected mirror without changing their apt configuration.
+  const sources = `${BASE}/termux-main.list`;
+  fs.writeFileSync(sources, 'deb https://codeb.baiyun.si/termux/main stable main\n', { mode: 0o600 });
+  const options = ['-o', `Dir::Etc::sourcelist=${sources}`, '-o', 'Dir::Etc::sourceparts=-',
+    '-o', 'Acquire::Retries=2', '-o', 'Acquire::https::Timeout=20'];
+  for (const args of [['update'], ['install', '-y', ...missing]]) {
+    await new Promise((resolve, reject) => {
+      const child = spawn(`${PREFIX}/bin/apt-get`, [...options, ...args], { env: termuxEnvironment(), stdio: ['ignore', 'inherit', 'inherit'] });
+      child.on('error', reject);
+      child.on('exit', code => code === 0 ? resolve() : reject(new Error('Termux dependencies could not be installed; retry environment setup')));
+    });
+  }
+  fs.writeFileSync(stage, 'dependencies-ready', { mode: 0o600 });
+}
+
+function validateTerminalCommand(input) {
+  if (!Array.isArray(input.argv) || !input.argv.length || input.argv.length > 128 ||
+      input.argv.some(arg => typeof arg !== 'string' || arg.includes('\0') || arg.length > 32768) ||
+      typeof input.cwd !== 'string' || !path.isAbsolute(input.cwd) || input.cwd.includes('\0'))
+    throw new Error('Invalid terminal command');
+  return input;
+}
+
+function writeTerminalHelpers() {
+  const bin = `${BASE}/bin`;
+  fs.mkdirSync(bin, { recursive: true, mode: 0o700 });
+  fs.mkdirSync(`${HOME}/.agents/skills`, { recursive: true, mode: 0o700 });
+  const source = `#!${PREFIX}/bin/node
+const http=require('node:http'),path=require('node:path');
+const name=path.basename(process.argv[1]);
+const argv=name==='codeb-termux'?process.argv.slice(2):[${JSON.stringify(PREFIX)}+'/bin/'+name,...process.argv.slice(2)];
+const url=new URL(process.env.CODEB_TERMUX_URL||'http://127.0.0.1:0');
+const req=http.request({host:url.hostname,port:url.port,path:'/termux',method:'POST',auth:decodeURIComponent(url.username)+':'+decodeURIComponent(url.password)},res=>{
+ if(res.statusCode!==200){console.error('Termux command unavailable');res.resume();process.exitCode=1;process.stdin.unpipe(req);process.stdin.pause();req.destroy();return;}
+ let buffer='',ended=false;res.setEncoding('utf8');res.on('data',chunk=>{buffer+=chunk;let end;while((end=buffer.indexOf('\\n'))>=0){const row=JSON.parse(buffer.slice(0,end));buffer=buffer.slice(end+1);if(row.stdout)process.stdout.write(Buffer.from(row.stdout,'base64'));if(row.stderr)process.stderr.write(Buffer.from(row.stderr,'base64'));if(row.exitCode!==undefined){ended=true;process.exitCode=row.exitCode;}}});
+ const close=()=>{process.stdin.unpipe(req);process.stdin.pause();req.destroy();};
+ res.on('end',()=>{if(!ended)process.exitCode=1;close();});res.on('error',()=>{process.exitCode=1;close();});
+});
+req.on('error',()=>{console.error('Termux session disconnected');process.exitCode=1;process.stdin.unpipe(req);process.stdin.pause();});
+req.write(JSON.stringify({argv,cwd:name==='codeb-termux'&&process.getuid()!==0?process.cwd():${JSON.stringify(HOME)}})+'\\n');
+process.stdin.pipe(req);
+`;
+  fs.writeFileSync(`${bin}/codeb-termux`, source, { mode: 0o700 });
+  for (const name of ['pkg', 'apt', 'apt-get', 'dpkg', 'pip', 'pip3']) {
+    const target = `${bin}/${name}`;
+    if (!fs.existsSync(target)) fs.symlinkSync('codeb-termux', target);
+  }
+  // ponytail: one Debian environment per phone; per-project Python venvs isolate pinned dependencies.
+  // GPU/desktop or kernel-specific Linux skills still require their actual platform.
+  fs.writeFileSync(`${bin}/codeb-linux`, `#!${PREFIX}/bin/bash\nexec ${quote(`${bin}/codeb-termux`)} ${quote(`${PREFIX}/bin/bash`)} ${quote(`${bin}/codeb-linux-setup`)} "$@"\n`, { mode: 0o700 });
+  fs.writeFileSync(`${bin}/codeb-linux-setup`, String.raw`#!${PREFIX}/bin/bash
+set -eu
+if [ ! -d "$PREFIX/var/lib/proot-distro/installed-rootfs/debian" ]; then proot-distro install debian; fi
+exec proot-distro login debian --shared-tmp --bind "$HOME:$HOME" -- /bin/bash -c '
+set -eu
+if [ ! -f /usr/local/share/codeb-python-ready ] || ! command -v python3 >/dev/null || ! command -v git >/dev/null; then
+ export DEBIAN_FRONTEND=noninteractive
+ apt-get update && apt-get install -y ca-certificates python3 python3-venv python3-pip git curl
+ touch /usr/local/share/codeb-python-ready
+fi
+exec "$@"
+' codeb-linux "$@"
+`, { mode: 0o700 });
+  fs.writeFileSync(`${BASE}/setup-stage`, 'ready', { mode: 0o600 });
+}
+
 function validateLaunch(input) {
   if (!['standard', 'root'].includes(input.mode) || !/^[a-f0-9]{32}$/.test(input.session) ||
       !/^[a-f0-9]{64}$/.test(input.tokenHash) || !Number.isInteger(input.port) || input.port < 1024 || input.port > 65535)
@@ -87,7 +175,30 @@ async function startProxy() {
   const password = crypto.randomBytes(32).toString('hex');
   const authorization = 'Basic ' + Buffer.from(`codeb:${password}`).toString('base64');
   const sockets = new Set();
-  const server = http.createServer((req, res) => { res.writeHead(405); res.end(); });
+  const commands = new Set();
+  const server = http.createServer(async (req, res) => {
+    if (req.headers.authorization !== authorization) { res.writeHead(401); res.end(); return; }
+    if (req.method !== 'POST' || req.url !== '/termux') { res.writeHead(405); res.end(); return; }
+    try {
+      const input = validateTerminalCommand(await firstLine(req, 65536));
+      if (commands.size >= 4) { res.writeHead(429); res.end(); return; }
+      const child = spawn(input.argv[0], input.argv.slice(1), { cwd: input.cwd,
+        env: fs.existsSync(PREFIX) ? termuxEnvironment() : process.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+      child.stdin.on('error', () => {});
+      req.pipe(child.stdin); req.resume();
+      commands.add(child);
+      res.writeHead(200, { 'Content-Type': 'application/x-ndjson' });
+      const send = value => { if (!res.destroyed) res.write(JSON.stringify(value) + '\n'); };
+      const stop = () => { if (child.exitCode === null) { try { process.platform === 'win32' ? child.kill() : process.kill(-child.pid, 'SIGTERM'); } catch {} } };
+      const timer = setTimeout(stop, 15 * 60 * 1000);
+      child.stdout.on('data', data => { if (!res.destroyed && !res.write(JSON.stringify({ stdout: data.toString('base64') }) + '\n')) child.stdout.pause(); });
+      child.stderr.on('data', data => { if (!res.destroyed && !res.write(JSON.stringify({ stderr: data.toString('base64') }) + '\n')) child.stderr.pause(); });
+      res.on('drain', () => { child.stdout.resume(); child.stderr.resume(); });
+      child.on('error', () => { send({ stderr: Buffer.from('Could not start Termux command\n').toString('base64') }); });
+      child.on('close', code => { clearTimeout(timer); commands.delete(child); send({ exitCode: code ?? 1 }); res.end(); });
+      res.on('close', stop);
+    } catch { if (!res.headersSent) res.writeHead(400); res.end(); }
+  });
   server.on('connect', (req, client, head) => {
     if (req.headers['proxy-authorization'] !== authorization) return client.end('HTTP/1.1 407 Proxy Authentication Required\r\n\r\n');
     let target;
@@ -106,7 +217,7 @@ async function startProxy() {
   });
   server.on('connection', socket => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  return { url: `http://codeb:${password}@127.0.0.1:${server.address().port}`, close() { server.close(); for (const socket of sockets) socket.destroy(); } };
+  return { url: `http://codeb:${password}@127.0.0.1:${server.address().port}`, close() { server.close(); for (const socket of sockets) socket.destroy(); for (const child of commands) child.kill('SIGTERM'); } };
 }
 
 async function runChild(mode) {
@@ -131,8 +242,9 @@ async function runChild(mode) {
   fs.writeFileSync(`${home}/config.toml.new`, config.join('\n') + '\n', { mode: 0o600 });
   fs.renameSync(`${home}/config.toml.new`, `${home}/config.toml`);
   const child = spawn(BIN, ['app-server', '--listen', 'stdio://'], {
-    cwd, env: { ...process.env, HOME, PREFIX, CODEX_HOME: home, SHELL: `${PREFIX}/bin/bash`,
-      TMPDIR: `${PREFIX}/tmp`, PATH: `${BASE}/runtime/${VERSION}/codex-path:${PREFIX}/bin:/system/bin`,
+    cwd, env: { ...termuxEnvironment(), HOME, PREFIX, CODEX_HOME: home, SHELL: `${PREFIX}/bin/bash`,
+      CODEB_TERMUX_URL: input.proxy,
+      TMPDIR: `${PREFIX}/tmp`, PATH: `${BASE}/bin:${BASE}/runtime/${VERSION}/codex-path:${PREFIX}/bin:/system/bin`,
       CODEB_API_KEY: input.apiKey, SSL_CERT_FILE: `${PREFIX}/etc/tls/cert.pem`,
       HTTPS_PROXY: input.proxy, HTTP_PROXY: input.proxy, NO_PROXY: '127.0.0.1,localhost',
       https_proxy: input.proxy, http_proxy: input.proxy, no_proxy: '127.0.0.1,localhost' },
@@ -154,6 +266,7 @@ async function runChild(mode) {
 async function serve(options) {
   const input = validateLaunch(options);
   await install();
+  writeTerminalHelpers();
   const proxy = await startProxy();
   let child;
   let accepted = false;
@@ -191,8 +304,8 @@ async function serve(options) {
 
 if (require.main === module) {
   const operation = process.argv[2];
-  const promise = operation === 'child' ? runChild(process.argv[3]) : operation === 'install' ? install()
+  const promise = operation === 'child' ? runChild(process.argv[3]) : operation === 'install' ? install().then(writeTerminalHelpers)
     : serve(JSON.parse(Buffer.from(process.argv[3], 'base64').toString()));
   promise.catch(() => { process.stderr.write('Codeb runtime could not start. Check Termux, runtime files and Root permission.\n'); process.exit(1); });
 }
-module.exports = { validateLaunch, firstLine, startProxy };
+module.exports = { validateLaunch, firstLine, startProxy, validateTerminalCommand };

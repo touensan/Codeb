@@ -181,6 +181,6 @@ fun LocalWorkScreen(providers: List<ApiProvider>, defaultProviderId: String, onB
     },confirmButton={TextButton(onClick={choose=null}){Text(uiText(R.string.ui_037,"Cancel"))}})
 }
 
-private fun localFactory(application:Application)=object:ViewModelProvider.Factory {
+internal fun localFactory(application:Application)=object:ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST") override fun <T:ViewModel> create(modelClass:Class<T>):T=AppViewModel(application,autoRestore=false) as T
 }

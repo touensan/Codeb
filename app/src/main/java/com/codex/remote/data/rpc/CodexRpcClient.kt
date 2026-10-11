@@ -68,6 +68,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
 
 sealed interface AppServerEvent {
+    data class ApprovalResolved(val threadId: String?, val requestId: String, val originalId: String) : AppServerEvent
     data class ItemUpsert(val threadId: String?, val item: TimelineItem) : AppServerEvent
     data class AgentDelta(val threadId: String?, val itemId: String, val delta: String) : AppServerEvent
     data class PlanDelta(val threadId: String?, val itemId: String, val delta: String) : AppServerEvent
@@ -114,10 +115,25 @@ internal fun localRuntimeParams(method: String, params: JsonObject): JsonObject 
         put("approvalsReviewer", JsonPrimitive("user"))
         if (method == "turn/start") put("sandboxPolicy", buildJsonObject { put("type", "dangerFullAccess") })
         else put("sandbox", JsonPrimitive("danger-full-access"))
-        if (method == "thread/start") put("developerInstructions", JsonPrimitive(
+        if (method in setOf("thread/start", "thread/resume", "thread/fork")) put("developerInstructions", JsonPrimitive(
             "You are running on an Android phone through Codeb. Work only on files requested by the user. " +
             "Use the current process identity. Never invoke su, sudo, or change Android security policy to elevate privileges; " +
-            "ask the user to choose Codeb's Root mode when an operation needs root. Never expose credentials."
+            "ask the user to choose Codeb's Root mode when an operation needs root. Never expose credentials. " +
+            "This app supplies a ready Termux environment (Python, pip, git, native bcrypt/Pillow, termux-exec). " +
+            "When the user requests a skill or dependency installation, execute and verify it yourself instead of asking them to copy terminal commands. " +
+            "pkg, apt, apt-get, dpkg, pip and pip3 in PATH run through the ordinary Termux UID, even in Root mode. " +
+            "Use pkg install -y for required packages and noninteractive installation flags. " +
+            "Use codeb-termux <program> <args...> for any command that must run as the ordinary Termux user. " +
+            "For Android-incompatible Linux wheels or pinned native dependencies use codeb-linux bash -lc <command>; " +
+            "it prepares Debian and Python on first use. Use a per-skill venv there, never remove dependency pins to pretend compatibility. " +
+            "For Termux native Python dependencies use a venv with --system-site-packages when needed. " +
+            "Install shared phone skills as the ordinary Termux user under \$HOME/.agents/skills; Codex loads them natively. " +
+            "Keep existing \$CODEX_HOME/skills and project skills in place, retaining their original instructions. " +
+            "If an existing Root-private skill needs Linux compatibility, copy only that requested skill into the shared skill directory " +
+            "using a tar stream piped into codeb-termux tar, so the copied files belong to the ordinary UID; do not loosen Root-private directory permissions. " +
+            "For codeb-termux/codeb-linux run from a Termux-readable directory (such as \$HOME) and use absolute skill paths; " +
+            "the ordinary UID cannot read Root-private project folders. " +
+            "Report actual failures; do not claim every desktop or hardware-specific skill can run on Android."
         ))
     })
 }
@@ -732,7 +748,7 @@ class CodexRpcClient(
             }
             else -> buildJsonObject { put("decision", decision) }
         }
-        respond(request.requestId, result)
+        respond(request.requestId, result, request.originalId?.let { json.parseToJsonElement(it) })
     }
 
     suspend fun request(method: String, params: JsonObject = buildJsonObject {}): JsonObject {
@@ -823,6 +839,10 @@ class CodexRpcClient(
     }
 
     private suspend fun handleNotification(method: String, params: JsonObject) {
+        if (method == "serverRequest/resolved") {
+            params["requestId"]?.let { _events.emit(AppServerEvent.ApprovalResolved(params.string("threadId"), it.jsonPrimitive.content, it.toString())) }
+            return
+        }
         when (method) {
             "item/started", "item/completed" -> params.obj("item")?.let(::parseTimelineItem)?.let { item ->
                 val status = item.status.ifBlank {
@@ -984,7 +1004,7 @@ class CodexRpcClient(
                 rawMethod = method,
                 rawParams = params.toString(),
             )
-            "item/tool/requestUserInput" -> {
+            "item/tool/requestUserInput", "tool/requestUserInput" -> {
                 val questions = params.array("questions").mapNotNull { element ->
                     val question = element.asObject() ?: return@mapNotNull null
                     val questionId = question.string("id") ?: return@mapNotNull null
@@ -993,6 +1013,8 @@ class CodexRpcClient(
                         header = question.string("header").orEmpty(),
                         question = question.string("question") ?: "请输入回复",
                         options = question.array("options").mapNotNull { it.asObject()?.string("label") },
+                        optionDescriptions = question.array("options").mapNotNull { it.asObject()?.let { option -> option.string("label")?.let { option.string("description").orEmpty() } } },
+                        isSecret = question.boolean("isSecret"),
                     )
                 }
                 ApprovalRequest(
@@ -1007,7 +1029,7 @@ class CodexRpcClient(
             }
             else -> ApprovalRequest(id, ApprovalKind.UNKNOWN, "远端请求", method, method, params.toString())
         }
-        _events.emit(AppServerEvent.Approval(params.string("threadId"), request))
+        _events.emit(AppServerEvent.Approval(params.string("threadId"), request.copy(originalId = originalId.toString())))
     }
 
     companion object {
@@ -1263,9 +1285,19 @@ class CodexRpcClient(
                 })
             }
             attachments.distinctBy { it.id }.forEach { attachment ->
-                add(buildJsonObject {
-                    put("type", "image")
-                    put("url", attachment.dataUrl)
+                attachment.uploadedPath?.let { path -> add(buildJsonObject {
+                    put("type", "text")
+                    put("text", "[Attached file: ${attachment.displayName}]\n$path")
+                    put("text_elements", buildJsonArray {})
+                }) }
+                if (attachment.mimeType.startsWith("image/")) add(buildJsonObject {
+                    if (attachment.uploadedPath != null) {
+                        put("type", "localImage")
+                        put("path", attachment.uploadedPath)
+                    } else {
+                        put("type", "image")
+                        put("url", attachment.dataUrl)
+                    }
                 })
             }
             mentions.distinctBy { "${it.kind}:${it.path}" }.forEach { mention ->
@@ -1408,6 +1440,7 @@ class CodexRpcClient(
                 inputTokens = total["inputTokens"]?.jsonPrimitive?.longOrNull ?: 0,
                 outputTokens = total["outputTokens"]?.jsonPrimitive?.longOrNull ?: 0,
                 modelContextWindow = usage["modelContextWindow"]?.jsonPrimitive?.longOrNull,
+                contextTokens = usage.obj("last")?.get("totalTokens")?.jsonPrimitive?.longOrNull?.takeIf { it >= 0 },
             )
         }
 
@@ -1490,6 +1523,7 @@ class CodexRpcClient(
                     title = item.string("command").orEmpty(),
                     body = item.string("aggregatedOutput").orEmpty(),
                     status = item.string("status").orEmpty(),
+                    exitCode = item["exitCode"]?.jsonPrimitive?.longOrNull,
                 )
                 "fileChange" -> {
                     val changes = item.array("changes").mapNotNull { changeElement ->
@@ -1565,6 +1599,7 @@ class CodexRpcClient(
                     id,
                     TimelineKind.COMPACTION,
                     title = "Context compacted",
+                    status = item.string("status").orEmpty(),
                 )
                 "hookPrompt" -> TimelineItem(id, TimelineKind.TOOL, title = "Hook", body = "Prompt context added")
                 "sleep" -> TimelineItem(id, TimelineKind.TOOL, title = "Wait", body = "Codex waited before continuing")

@@ -15,6 +15,12 @@ import com.codex.remote.data.store.*
 import com.codex.remote.ui.*
 import com.codex.remote.ui.theme.CodexRemoteTheme
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
+import com.codex.remote.data.api.OpenAiClient
+import kotlinx.serialization.json.JsonArray
+import java.util.concurrent.CopyOnWriteArrayList
 import org.junit.Assert.*
 import org.junit.Rule
 import org.junit.Test
@@ -28,6 +34,59 @@ class LocalWorkspaceUiTest {
     private var previousContext:android.content.Context?=null
     @org.junit.Before fun prepare(){previousContext=UiText.context;UiText.context=rule.activity}
     @org.junit.After fun restore(){UiText.context=previousContext}
+    @Test fun dailyModelPickerWorksDuringReplyAndNextRequestsUseTheSelection() {
+        val app=rule.activity.application
+        val store=ApiStore(app); val original=store.providers()
+        val provider=ApiProvider("daily-model-check","Daily check","https://example.com/v1",store.encryptKey("offline-check"),
+            models=listOf(ApiModel("model-a",listOf("low","high"),true),ApiModel("model-b",listOf("low","high"),true)),selectedModel="model-a",effort="low")
+        val other=provider.copy(id="daily-other-check",name="Other check",models=listOf(ApiModel("model-c",listOf("low"),true)),selectedModel="model-c")
+        val gates=CopyOnWriteArrayList<CompletableDeferred<Unit>>()
+        val calls=CopyOnWriteArrayList<Triple<String,String,String>>()
+        val fake=object:OpenAiClient() {
+            override suspend fun stream(provider:ApiProvider,key:String,messages:List<LocalMessage>,prefix:JsonArray?,onDelta:(String)->Unit) {
+                val gate=CompletableDeferred<Unit>(); gates+=gate
+                calls+=Triple(provider.id,provider.selectedModel,provider.effort)
+                onDelta("partial-${messages.last().text}")
+                withContext(NonCancellable){gate.await();onDelta("-late")}
+            }
+        }
+        store.saveProviders(original+provider+other)
+        val vm=LocalViewModel(app,fake)
+        val lifecycle=androidx.lifecycle.ViewModelStore().apply {put("daily-model-check",vm)}
+        try {
+            rule.waitUntil(10000){vm.state.value.providers.any {it.id==provider.id}}
+            rule.runOnIdle {vm.provider(provider.id);vm.newConversation()}
+            rule.setContent {CodexRemoteTheme {LocalPane(vm,false,{})}}
+            rule.runOnIdle {vm.draft("first");vm.send()}
+            rule.waitUntil(10000){calls.size==1&&vm.state.value.selected!!.messages.last().text.isNotEmpty()}
+            rule.onNodeWithTag("daily-model").assertIsEnabled().performClick()
+            rule.onNodeWithText(uiText(R.string.ui_191,"Model")).performClick()
+            rule.onNodeWithText("model-b").performClick()
+            assertEquals("model-b",vm.state.value.selected!!.model)
+            assertTrue(vm.state.value.sending)
+            assertEquals(Triple(provider.id,"model-a","low"),calls.single())
+            rule.runOnIdle {vm.selectModel("model-b","high");vm.selectModel("not-configured");vm.draft("queued");vm.send()}
+            assertEquals("model-b",vm.state.value.selected!!.model)
+            assertEquals("high",vm.state.value.selected!!.effort)
+            gates[0].complete(Unit)
+            rule.waitUntil(10000){calls.size==2}
+            assertEquals(Triple(provider.id,"model-b","high"),calls[1])
+            rule.runOnIdle {vm.provider(other.id);vm.selectModel("model-c","low");vm.draft("steered");vm.send(steer=true)}
+            rule.waitUntil(10000){calls.size==3}
+            assertEquals(Triple(other.id,"model-c","low"),calls[2])
+            gates[1].complete(Unit)
+            rule.waitUntil(10000){vm.state.value.selected!!.messages.last().text=="partial-steered"}
+            assertTrue(vm.state.value.sending)
+            assertFalse(vm.state.value.selected!!.messages.first {it.text.startsWith("partial-queued")}.text.endsWith("-late"))
+            gates[2].complete(Unit)
+            rule.waitUntil(10000){!vm.state.value.sending}
+            assertEquals("model-c",vm.state.value.selected!!.model)
+        } finally {
+            gates.forEach {it.complete(Unit)}
+            rule.runOnIdle {lifecycle.clear()}
+            store.saveProviders(original)
+        }
+    }
     @Test fun rootPreferenceAndModelPickerRemainAfterReopeningSettings() {
         val prefs=rule.activity.getSharedPreferences("phone-work",0)
         val before=prefs.all

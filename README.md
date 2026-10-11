@@ -5,9 +5,9 @@
 日常模式直接使用兼容 OpenAI 的 API；本机 Codeb 通过 Termux 在手机上运行官方 Codex，也可通过 SSH 使用服务器上的 Codex。
 原生 Android / Kotlin / Jetpack Compose，支持中文、English、日本語。
 
-[下载 0.2.10](https://codeb.baiyun.si/downloads/codeb-0.2.10.apk) · [官网](https://codeb.baiyun.si/) · [配置教程](https://api.baiyun.si/docs/codeb/) · [功能与限制](docs/LOCAL_CLIENT.md)
+[下载 0.2.16](https://codeb.baiyun.si/downloads/codeb-0.2.16.apk) · [官网](https://codeb.baiyun.si/) · [Skills 市场](https://codeb.baiyun.si/skills/) · [配置教程](https://api.baiyun.si/docs/codeb/) · [功能与限制](docs/LOCAL_CLIENT.md)
 
-当前源码版本为 **0.2.10（versionCode 14）**。本机运行时的可运行检查见 `node tools/check-local-runtime.cjs`。
+当前源码版本为 **0.2.16（versionCode 20）**。本机运行时的可运行检查见 `node tools/check-local-runtime.cjs`。
 
 [![Android CI](https://github.com/touensan/Codeb/actions/workflows/android.yml/badge.svg)](https://github.com/touensan/Codeb/actions/workflows/android.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -15,10 +15,11 @@
 ## 可以做什么
 
 - **远程 Codex**：保存多个 SSH 连接，切换已有项目，继续服务器会话，查看历史、活动、命令与文件变更；模型、推理强度及速度选项跟随服务器实际能力。
-- **手机直连 API**：Chat Completions / Responses 流式对话；管理多个供应商，拉取、搜索和分页查看模型，逐个测试模型，自动匹配推理档位，也能填写供应商自定义的原始 ID。
+- **手机直连 API**：Chat Completions / Responses 流式对话；管理多个供应商，拉取、搜索和分页查看模型，逐个测试模型，自动匹配推理档位，也能填写供应商自定义的原始 ID。运行中可切换模型、推理强度和供应商，后续消息或立即引导使用新选择。
 - **本机 Codeb**：侧栏进入，设置保存供应商、模型与 Root 开关；按步骤下载 Termux、复制准备命令、检查环境，自有域名提供官方安装包与经校验的运行时。官方 Codex 处理本机文件和命令，复用已有 Responses 中转站。两档权限分别保存会话和默认项目目录，保留已有聊天配置。[本机配置说明](docs/PHONE_WORKSPACE.md)
 - **阅读与文件**：目录浏览、自动折行的文本编辑、冲突保护、新建/重命名/删除与导入导出；Markdown、源码、图片和 PDF 预览，宽表格横向滑动，ZIP/APK/JAR 目录预览。
 - **手机操控与 Skill**：工作模式支持 Codex 原生 Skill；Android 11+ 可通过无障碍读取屏幕、点击、滑动和输入。首次启用所选模型才测试图片输入，通过后放行，悬浮球可暂停/继续、查看输出和返回对话，也可随时停止授权。
+- **Skills 市场**：浏览、搜索手机适配技能，选择本机或 SSH 环境安装、更新和卸载；保留来源/许可证，校验正文摘要，保护已有技能和本地修改。[浏览市场](https://codeb.baiyun.si/skills/)。
 - **本地保存**：聊天、草稿和已读取的远程历史保存在手机；手动清理缓存保留工作空间、主机和 API 配置。
 - **语言切换**：打开侧栏 → 设置 → 显示语言，可选择跟随系统、中文、English、日本語，立即生效并保存选择。
 - **关于与更新**：显示实际安装版本、检查更新、打开配置教程与反馈交流群；添加 API 时可查看推荐供应商和兼容性说明，客户端离线保留有效配置缓存。
@@ -28,7 +29,7 @@
 
 ## 安装与升级
 
-当前正式安装包为 [0.2.10](https://codeb.baiyun.si/downloads/codeb-0.2.10.apk)，可用同路径的 [.sha256](https://codeb.baiyun.si/downloads/codeb-0.2.10.apk.sha256) 校验。GitHub 历史发行见 [Releases](https://github.com/touensan/Codeb/releases)。Android 8.0 及以上；本机工作模式需要 ARM64 Android 和 Termux。
+当前正式安装包为 [0.2.16](https://codeb.baiyun.si/downloads/codeb-0.2.16.apk)，可用同路径的 [.sha256](https://codeb.baiyun.si/downloads/codeb-0.2.16.apk.sha256) 校验。[GitHub 下载](https://github.com/touensan/Codeb/releases/latest) 提供同一正式安装包，包含 Codeb 的更新、教程、反馈和 Skills 市场入口。Android 8.0 及以上；本机工作模式需要 ARM64 Android 和 Termux。
 正式包关闭调试模式和调试 API，不带 `dev` 版本后缀。
 
 为让已有白云Codeb 用户覆盖升级并保留聊天、SSH 和 API 配置，正式版沿用原安装包名

@@ -755,11 +755,11 @@ val answer = 42
         composeRule.onNodeWithTag("timeline-tool-reasoning").assertIsDisplayed()
     }
 
-    @Test fun expandingCompletedDetailsKeepsTheFullReplyAndExplainsMissingSummary() {
+    @Test fun emptyReasoningStaysHiddenUntilActualSummaryArrives() {
         val answer = "你好！今天想做点什么？"
         val state = mutableStateOf(baseState(timeline = listOf(
             TimelineItem("prompt", TimelineKind.USER, body = "你好啊", turnId = "t1"),
-            TimelineItem("reasoning", TimelineKind.REASONING, title = "Reasoning", status = "completed", turnId = "t1"),
+            TimelineItem("reasoning", TimelineKind.REASONING, title = "Reasoning", body = " \n\t", status = "completed", turnId = "t1"),
             TimelineItem("final", TimelineKind.AGENT, body = answer, status = "completed", turnId = "t1", elapsedMs = 3000))))
         show(state)
         fun hasFullReply(): Boolean {
@@ -770,14 +770,21 @@ val answer = 42
             return found
         }
         composeRule.waitUntil(5_000) { hasFullReply() }
-        repeat(3) {
-            composeRule.onNodeWithTag("reply-duration-final").performClick()
-            composeRule.onNodeWithTag("timeline-tool-reasoning").performClick()
-            composeRule.onNodeWithTag("timeline-tool-body-reasoning").assertIsDisplayed()
-            composeRule.waitUntil(5_000) { hasFullReply() }
-            composeRule.onNodeWithTag("reply-duration-final").performClick()
-            composeRule.waitUntil(5_000) { hasFullReply() }
+        composeRule.onNodeWithTag("timeline-tool-reasoning").assertDoesNotExist()
+        composeRule.onNodeWithTag("reply-duration-final").assertIsNotEnabled()
+        composeRule.onNodeWithTag("timeline-tool-reasoning").assertDoesNotExist()
+        composeRule.runOnIdle {
+            state.value = state.value.copy(isTurnRunning = true, activeTurnId = "t1", timeline = state.value.timeline.map {
+                if (it.id == "reasoning") it.copy(body = "", status = "inProgress") else it
+            })
         }
+        composeRule.onNodeWithTag("timeline-tool-reasoning").assertDoesNotExist()
+        composeRule.runOnIdle { state.value = state.value.copy(timeline = state.value.timeline.map {
+            if (it.id == "reasoning") it.copy(body = "Reported summary") else it
+        }) }
+        composeRule.onNodeWithTag("timeline-tool-reasoning").assertIsDisplayed().performClick()
+        composeRule.onNodeWithText("Reported summary").assertIsDisplayed()
+        composeRule.waitUntil(5_000) { hasFullReply() }
     }
 
     @Test fun connectionsUseEachLiveHostStateInsteadOfTheSelectionManager() {
@@ -924,6 +931,67 @@ val answer = 42
         composeRule.onAllNodesWithTag("timeline-tool-body-command").assertCountEquals(0)
         composeRule.onNodeWithTag("timeline-tool-command").performClick()
         composeRule.onNodeWithTag("timeline-tool-body-command").assertIsDisplayed()
+    }
+
+    @Test fun compactionRingAndStatusUseCurrentContextRatherThanCumulativeTokens() {
+        val usage = RemoteThreadTokenUsage(614497, 600000, 14497, 258400, contextTokens = 52000)
+        val state = mutableStateOf(baseState().copy(threadTokenUsage = usage.copy(contextTokens = null), contextCompactionStatus = "inProgress"))
+        show(state)
+        composeRule.onNodeWithTag(COMPOSER_CONTEXT).assertContentDescriptionEquals("正在压缩任务上下文").performClick()
+        composeRule.onNodeWithText("工作状态").assertIsDisplayed()
+        composeRule.onNodeWithText("614497 tokens").assertIsDisplayed()
+        composeRule.runOnIdle { state.value = state.value.copy(contextCompactionStatus = "completed", threadTokenUsage = usage) }
+        composeRule.onNodeWithText("任务上下文已压缩").assertIsDisplayed()
+        composeRule.onNodeWithText("79% remaining · 52000 / 258400 tokens").assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_CONTEXT).assertContentDescriptionEquals("上下文已使用 20%")
+        composeRule.runOnIdle { state.value = state.value.copy(threadTokenUsage = usage.copy(contextTokens = null)) }
+        composeRule.onNodeWithTag(COMPOSER_CONTEXT).assertContentDescriptionEquals("上下文用量尚不可用")
+        composeRule.onAllNodesWithText("Waiting for usage data").assertCountEquals(2)
+    }
+
+    @Test fun commandGroupsShowTheirTypeAndKeepTheActualExitCode() {
+        val state = mutableStateOf(baseState(timeline = listOf(
+            TimelineItem("prompt", TimelineKind.USER, body = "Work", turnId = "turn"),
+            TimelineItem("c1", TimelineKind.COMMAND, title = "pwd", body = "/work", status = "completed", exitCode = 0, turnId = "turn"),
+            TimelineItem("c2", TimelineKind.COMMAND, title = "/data/data/com.termux/files/usr/bin/bash -lc 'pkg install demo'", body = "Package unavailable", status = "failed", exitCode = 42, turnId = "turn")
+        ), isTurnRunning = true))
+        show(state)
+        composeRule.onNodeWithText("Command").assertIsDisplayed()
+        composeRule.onNodeWithText("部分未成功").assertDoesNotExist()
+        composeRule.onNodeWithText("未成功").assertDoesNotExist()
+        composeRule.onNodeWithTag("timeline-tool-command-group:c1").performClick()
+        composeRule.onNodeWithText("退出码 42", substring = true).assertIsDisplayed()
+        composeRule.onNodeWithText("Package unavailable", substring = true).assertIsDisplayed()
+    }
+
+    @Test fun runningToolsHaveVisibleRowsInsteadOfBlankSpace() {
+        val state = mutableStateOf(baseState(timeline = listOf(
+            TimelineItem("prompt", TimelineKind.USER, body = "Work", turnId = "turn"),
+            TimelineItem("tool-a", TimelineKind.TOOL, title = "Install dependency", body = "Installing", status = "completed", turnId = "turn"),
+            TimelineItem("tool-b", TimelineKind.TOOL, title = "Verify dependency", body = "Checking", status = "inProgress", turnId = "turn"),
+            TimelineItem("reply", TimelineKind.AGENT, body = "Continuing", status = "inProgress", turnId = "turn")
+        ), isTurnRunning = true))
+        show(state)
+        scrollTo("timeline-tool-tool-a")
+        composeRule.onNodeWithTag("timeline-tool-tool-a").assertIsDisplayed()
+        scrollTo("timeline-tool-tool-b")
+        composeRule.onNodeWithTag("timeline-tool-tool-b").assertIsDisplayed()
+        composeRule.onNodeWithTag("timeline-tool-tool-b").performClick()
+        composeRule.onNodeWithTag("timeline-tool-body-tool-b").assertIsDisplayed()
+    }
+
+    @Test fun localAttachmentMenuDoesNotHideImagesWhenModelMetadataIsMissing() {
+        val initial=baseState()
+        val state=mutableStateOf(initial.copy(activeConnection=initial.activeConnection!!.copy(localAccess="root"),
+            models=initial.models.map {it.copy(inputModalities=emptySet())}))
+        show(state)
+        composeRule.onNodeWithTag("composer-add").performClick()
+        composeRule.onNodeWithText("图片").assertIsEnabled()
+        composeRule.onNodeWithText("Phone file").assertIsEnabled()
+        composeRule.onNodeWithText("Folder").assertIsEnabled().performClick()
+        composeRule.onNodeWithTag("remote-project-path").assertIsDisplayed()
+        composeRule.onNodeWithTag("select-remote-folder").assertIsEnabled()
+        composeRule.onAllNodesWithTag("new-remote-folder").assertCountEquals(0)
     }
 
     private fun scrollTo(tag: String) {
@@ -1167,7 +1235,7 @@ private fun baseState(
         approvalPolicy = "on-request",
         approvalsReviewer = "user",
         remoteAccount = RemoteAccount("chatgpt", "qa@example.invalid", "plus", false),
-        threadTokenUsage = RemoteThreadTokenUsage(128_000, 120_000, 8_000, 200_000),
+        threadTokenUsage = RemoteThreadTokenUsage(128_000, 120_000, 8_000, 200_000, contextTokens = 128_000),
         isTurnRunning = isTurnRunning,
         activeTurnId = if (isTurnRunning) "turn-a" else null,
         isRestoringLastConnection = false,

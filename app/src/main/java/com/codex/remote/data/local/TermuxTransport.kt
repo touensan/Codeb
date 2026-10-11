@@ -125,10 +125,12 @@ class TermuxTransport private constructor(
             val releaseBinding = { heartbeat.cancel(); runCatching { owner.unbindService(binding) }; Unit }
             var connected: Socket? = null
             try {
+                // Native callback reports preparation failures immediately, rather than waiting on an unopened socket.
+                RuntimeSetup.run(context, install = true, root = false)
                 try { owner.startService(intent) } catch (error: Exception) {
                     throw IllegalStateException(uiText(R.string.local_termux_setup, "Install Termux and Node.js, and enable allow-external-apps=true in Termux settings."), error)
                 }
-                withTimeout(180_000) {
+                withTimeout(900_000) {
                     while (connected == null) {
                         currentCoroutineContext().ensureActive()
                         val candidate = Socket()

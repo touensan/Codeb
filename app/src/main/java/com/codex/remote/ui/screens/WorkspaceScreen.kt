@@ -516,6 +516,7 @@ fun WorkspaceScreen(
     state.pendingApproval?.let { approval ->
         ApprovalDialog(
             approval = approval,
+            submitting = state.isApprovalSubmitting,
             onDecision = onApproval,
         )
     }
@@ -1057,7 +1058,7 @@ private fun WorkspaceContent(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         IconButton(onClick = onNewThread) { Icon(Icons.Outlined.EditNote, uiText(R.string.ui_052, "New task")) }
                         ThreadHeaderOverflow(onRename = onRenameCurrentThread, onCompact = onCompactThread,
-                            compactEnabled = canCompose && !state.isTurnRunning, onFork = onForkThread,
+                            compactEnabled = canCompose && !state.isTurnRunning && state.contextCompactionStatus != "inProgress", onFork = onForkThread,
                             onReview = { showReviewDialog = true }, onArchive = onArchiveCurrentThread)
                     }
                 } else IconButton(onClick = onMenu) { Icon(Icons.Outlined.Search, uiText(R.string.ui_054, "Search tasks")) }
@@ -1278,7 +1279,9 @@ internal fun groupConsecutiveCommands(timeline: List<TimelineItem>): List<Timeli
         } else {
             val status = when {
                 commands.any { it.status.isTimelineItemRunning() } -> "inProgress"
-                commands.any { it.status.equals("failed", ignoreCase = true) } -> "failed"
+                commands.any { it.status in listOf("cancelled", "interrupted") } -> "interrupted"
+                commands.all { it.status.lowercase() in listOf("failed", "error", "declined") || it.exitCode?.let { code -> code != 0L } == true } -> "failed"
+                commands.any { it.status.lowercase() in listOf("failed", "error", "declined") || it.exitCode?.let { code -> code != 0L } == true } -> "partialFailure"
                 else -> "completed"
             }
             val body = commands.mapIndexed { commandIndex, command ->
@@ -1286,6 +1289,8 @@ internal fun groupConsecutiveCommands(timeline: List<TimelineItem>): List<Timeli
                     append(commandIndex + 1)
                     append(". ")
                     append(command.title.ifBlank { uiText(R.string.ui_080, "Command") })
+                    append("\n")
+                    append(commandStatusLabel(command))
                     if (command.body.isNotBlank()) {
                         append('\n')
                         append(command.body.trimEnd())
@@ -1311,7 +1316,7 @@ internal fun groupConsecutiveCommands(timeline: List<TimelineItem>): List<Timeli
 }
 
 internal fun conversationPresentation(timeline: List<TimelineItem>): List<TimelinePresentationItem> {
-    val grouped = groupConsecutiveCommands(timeline)
+    val grouped = groupConsecutiveCommands(timeline.filter { it.kind != TimelineKind.REASONING || it.body.isNotBlank() })
     var currentTurn = "legacy:0"
     val turns = grouped.mapIndexed { index, row ->
         if (row.item.kind == TimelineKind.USER) currentTurn = row.item.turnId?.let { "turn:$it" } ?: "legacy:$index"
@@ -1351,6 +1356,27 @@ internal fun conversationPresentation(timeline: List<TimelineItem>): List<Timeli
     }
 }
 
+internal fun commandTitle(item: TimelineItem): String =
+    if (item.title.trimStart().substringBefore(' ').substringAfterLast('/') in listOf("bash", "sh", "zsh", "pwsh", "powershell.exe", "cmd.exe"))
+        uiText(R.string.execute_command, "执行命令") else item.title.ifBlank { uiText(R.string.ui_080, "Command") }
+
+internal fun commandStatusLabel(item: TimelineItem): String = when {
+    item.status.isTimelineItemRunning() -> uiText(R.string.ui_087, "Working")
+    item.status == "partialFailure" -> uiText(R.string.commands_partial_failure, "部分未成功")
+    item.status == "declined" -> uiText(R.string.command_not_run, "未执行")
+    item.status in listOf("cancelled", "interrupted") -> uiText(R.string.task_stopped, "Stopped")
+    item.exitCode?.let { it != 0L } == true -> uiText(R.string.command_exit_unsuccessful, "未成功 · 退出码 %1\$d", item.exitCode!!)
+    item.status.equals("failed", true) || item.status.equals("error", true) -> uiText(R.string.step_unsuccessful, "未成功")
+    item.status.isBlank() || item.status == "completed" || item.exitCode == 0L -> uiText(R.string.ui_181, "Completed")
+    else -> item.status
+}
+
+internal fun compactionStatusLabel(status: String?): String = when (status) {
+    "inProgress", "running" -> uiText(R.string.ui_313, "正在压缩任务上下文")
+    "failed", "error" -> uiText(R.string.compaction_failed, "上下文压缩未成功")
+    else -> uiText(R.string.ui_329, "任务上下文已压缩")
+}
+
 @Composable
 private fun Conversation(
     state: AppUiState,
@@ -1370,9 +1396,10 @@ private fun Conversation(
     val displayedSnapshot = displayedReplies.toMap()
     val turnReplies = remember(presentationTimeline) { presentationTimeline.filter { it.item.kind == TimelineKind.AGENT }.groupBy { it.turnKey }.mapValues { (_, rows) -> rows.joinToString("\n\n") { it.item.body } } }
     val expandedActivity = remember(conversationKey) { mutableStateMapOf<String, Boolean>() }
+    val activeTurnKey = presentationTimeline.lastOrNull()?.turnKey.takeIf { state.isTurnRunning }
     val visibleTimeline = presentationTimeline.filter { row ->
         row.item.kind == TimelineKind.USER || row.isTurnReply || row.startsActivity ||
-            (expandedActivity[row.turnKey] ?: false) || row.turnElapsedMs == null
+            (expandedActivity[row.turnKey] ?: false) || row.turnKey == activeTurnKey || row.turnElapsedMs == null
     }
     val dragged by listState.interactionSource.collectIsDraggedAsState()
     var pendingHistoryAnchor by remember(conversationKey) { mutableStateOf<HistoryScrollAnchor?>(null) }
@@ -1612,7 +1639,8 @@ private fun Conversation(
                         expandedActivity[presentation.turnKey] = !expanded
                     }
                 }
-                if (presentation.item.kind == TimelineKind.USER || presentation.isTurnReply || expanded || presentation.turnElapsedMs == null && !running) {
+                // Running tools stay visible as compact rows. Never keep an empty lazy item for a hidden tool.
+                if (presentation.item.kind == TimelineKind.USER || presentation.isTurnReply || expanded || running || presentation.turnElapsedMs == null) {
                 Box(
                     Modifier.fillMaxWidth().testTag("timeline-item-${presentation.item.id}"),
                     contentAlignment = Alignment.TopCenter,
@@ -1817,8 +1845,9 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier, footerFiles: Lis
             autoCollapseOnComplete = true,
         )
         TimelineKind.COMMAND -> ExpandableTool(
-            modifier, Icons.Outlined.Terminal, item.title.ifBlank { uiText(R.string.ui_080, "Command") }, item.body, item.status,
-            expansionKey = item.id, mono = true, autoCollapseOnComplete = true,
+            modifier, Icons.Outlined.Terminal, commandTitle(item),
+            listOf(item.title.takeIf { commandTitle(item) != it }, item.body).filterNotNull().filter(String::isNotBlank).joinToString("\n\n"), item.status,
+            expansionKey = item.id, mono = true, autoCollapseOnComplete = true, statusLabel = uiText(R.string.ui_080, "Command"),
         )
         TimelineKind.FILE_CHANGE -> FileChangesTool(item, modifier)
         TimelineKind.TOOL -> Column(modifier) { ExpandableTool(
@@ -1843,7 +1872,7 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier, footerFiles: Lis
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Text(
-                item.title.ifBlank { uiText(R.string.ui_094, "Context compacted") },
+                compactionStatusLabel(item.status),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -2012,6 +2041,7 @@ private fun ExpandableTool(
     expansionKey: String,
     mono: Boolean = false,
     autoCollapseOnComplete: Boolean = false,
+    statusLabel: String? = null,
 ) {
     var expanded by remember(expansionKey) {
         mutableStateOf(false)
@@ -2023,30 +2053,32 @@ private fun ExpandableTool(
     ) {
         Column {
             Row(
-                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }.padding(horizontal = 12.dp, vertical = 10.dp),
+                modifier = Modifier.fillMaxWidth().clickable(enabled = body.isNotBlank()) { expanded = !expanded }.padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(icon, contentDescription = null, modifier = Modifier.size(17.dp))
                 Spacer(Modifier.width(9.dp))
                 Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                if (status.isNotBlank()) Text(when {
+                if (statusLabel != null || status.isNotBlank()) Text(statusLabel ?: when {
                     status.isTimelineItemRunning() -> uiText(R.string.ui_087, "Working")
                     status.equals("completed", true) -> uiText(R.string.ui_181, "Completed")
-                    status.equals("failed", true) || status.equals("error", true) -> uiText(R.string.ui_095, "Error")
+                    status.equals("failed", true) || status.equals("error", true) -> uiText(R.string.step_unsuccessful, "未成功")
+                    status == "declined" -> uiText(R.string.command_not_run, "未执行")
+                    status in listOf("cancelled", "interrupted") -> uiText(R.string.task_stopped, "Stopped")
                     else -> status
                 }, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.width(6.dp))
-                Icon(
+                if (body.isNotBlank()) Icon(
                     if (expanded) Icons.Outlined.ExpandMore else Icons.Outlined.ChevronRight,
                     contentDescription = if (expanded) uiText(R.string.ui_104, "收起") else uiText(R.string.ui_105, "展开"),
                     modifier = Modifier.size(18.dp),
                 )
             }
-            if (expanded) {
+            if (expanded && body.isNotBlank()) {
                 HorizontalDivider()
                 SelectionContainer {
                     Text(
-                        body.ifBlank { uiText(R.string.no_reasoning_summary, "The server did not provide a summary for this step.") },
+                        body,
                         modifier = Modifier.fillMaxWidth().padding(12.dp)
                             .testTag("timeline-tool-body-$expansionKey")
                             .semantics { onClick(uiText(R.string.ui_104, "Collapse")) { expanded = false; true } }
@@ -2292,9 +2324,21 @@ private fun Composer(
         onDispose { runCatching { draftStore.saveDraft(draftHost, draftKey, latestDraft) } }
     }
     var selectedMentions by remember(state.selectedThreadId) { mutableStateOf(emptyList<ComposerMention>()) }
-    var attachments by remember(state.selectedThreadId) { mutableStateOf(emptyList<ComposerImageAttachment>()) }
+    val attachmentSerializer = remember { kotlinx.serialization.builtins.ListSerializer(ComposerImageAttachment.serializer()) }
+    var attachments by remember(draftHost, draftKey) { mutableStateOf(runCatching {
+        kotlinx.serialization.json.Json.decodeFromString(attachmentSerializer, draftStore.draft(draftHost, "attachments:$draftKey"))
+    }.getOrDefault(emptyList())) }
+    val latestAttachments by rememberUpdatedState(attachments)
+    LaunchedEffect(attachments, draftHost, draftKey) {
+        withContext(Dispatchers.IO) { draftStore.saveDraft(draftHost, "attachments:$draftKey", kotlinx.serialization.json.Json.encodeToString(attachmentSerializer, attachments)) }
+    }
+    DisposableEffect(draftHost, draftKey) {
+        onDispose { draftStore.saveDraft(draftHost, "attachments:$draftKey", kotlinx.serialization.json.Json.encodeToString(attachmentSerializer, latestAttachments)) }
+    }
     LaunchedEffect(state.failedSend?.itemId) {
-        state.failedSend?.takeIf {it.itemId.startsWith("queue-failed-")}?.let { selectedMentions=it.mentions;attachments=it.attachments }
+        state.failedSend?.takeIf { it.itemId.startsWith("queue-failed-") || state.timeline.any { item -> item.id == it.itemId } }?.let {
+            if (attachments.isEmpty()) { selectedMentions=it.mentions; attachments=it.attachments }
+        }
     }
     var attachmentError by remember(state.selectedThreadId) { mutableStateOf<String?>(null) }
     var mentionKindFilter by remember(state.selectedThreadId) { mutableStateOf<ComposerMentionKind?>(null) }
@@ -2305,18 +2349,24 @@ private fun Composer(
     var policyMenu by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val composerScope = rememberCoroutineScope()
-    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-        uri ?: return@rememberLauncherForActivityResult
+    val importer = LocalWorkspaceImporter.current
+    var attaching by remember(draftHost, draftKey) { mutableStateOf(false) }
+    fun attach(uri: Uri?, imageOnly: Boolean) {
+        if (uri == null || attaching || attachments.size >= MAX_COMPOSER_IMAGES) return
+        val upload = importer ?: return
+        attaching = true
         composerScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { readComposerImageAttachment(context, uri) } }
-            result.onSuccess { attachment ->
-                attachments = (attachments + attachment).takeLast(MAX_COMPOSER_IMAGES)
+            try {
+                attachments = attachments + upload(uri, imageOnly)
                 attachmentError = null
-            }.onFailure { error ->
-                attachmentError = error.message ?: uiText(R.string.ui_106, "Unable to attach image")
-            }
+            } catch (error: Exception) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                attachmentError = error.message
+            } finally { attaching = false }
         }
     }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { attach(it, true) }
+    val filePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { attach(it, false) }
     val keyboardController = LocalSoftwareKeyboardController.current
     val density = LocalDensity.current
     val isKeyboardVisible = WindowInsets.ime.getBottom(density) > 0
@@ -2325,7 +2375,6 @@ private fun Composer(
     }
     val selectedModel = state.models.firstOrNull { it.id == state.selectedModel }
     val selectedServiceTier = selectedModel?.serviceTiers?.firstOrNull { it.id == state.selectedServiceTier }
-    val supportsImages = selectedModel?.inputModalities?.any { it.equals("image", true) } == true
     val selectedThread = state.threads.firstOrNull { it.id == state.selectedThreadId }
     val cwd = selectedThread?.cwd?.takeIf(String::isNotBlank) ?: state.selectedProjectPath.orEmpty()
     val addMenuSkills = state.skills.filter { it.enabled && (it.cwds.isEmpty() || cwd in it.cwds) }
@@ -2573,6 +2622,13 @@ private fun Composer(
                             Text(uiText(R.string.retry_send, "Retry message"))
                         }
                     }
+                    if (attaching) {
+                        Row(Modifier.padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(uiText(R.string.attachment_transferring, "Transferring attachment…"), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                     if (attachments.isNotEmpty()) {
                         Row(
                             modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
@@ -2588,7 +2644,7 @@ private fun Composer(
                                         modifier = Modifier.height(30.dp).padding(start = 8.dp, end = 2.dp),
                                         verticalAlignment = Alignment.CenterVertically,
                                     ) {
-                                        Icon(Icons.Outlined.Image, contentDescription = null, modifier = Modifier.size(15.dp))
+                                        Icon(if (attachment.mimeType.startsWith("image/")) Icons.Outlined.Image else Icons.Outlined.Description, contentDescription = null, modifier = Modifier.size(15.dp))
                                         Spacer(Modifier.width(5.dp))
                                         Text(
                                             attachment.displayName,
@@ -2601,7 +2657,7 @@ private fun Composer(
                                             onClick = { attachments = attachments.filterNot { it.id == attachment.id } },
                                             modifier = Modifier.size(28.dp),
                                         ) {
-                                            Icon(Icons.Outlined.Close, contentDescription = uiText(R.string.ui_107, "Remove image"), modifier = Modifier.size(15.dp))
+                                            Icon(Icons.Outlined.Close, contentDescription = uiText(R.string.ui_107, "Remove attachment"), modifier = Modifier.size(15.dp))
                                         }
                                     }
                                 }
@@ -2685,7 +2741,9 @@ private fun Composer(
                                     )
                                 },
                                 canBrowseRemoteFiles = sendEnabled && cwd.isNotBlank(),
-                                canAttachImage = supportsImages && attachments.size < MAX_COMPOSER_IMAGES,
+                                canAttachImage = sendEnabled && !attaching && attachments.size < MAX_COMPOSER_IMAGES,
+                                localWorkspace = state.activeConnection?.localAccess != null,
+                                onAttachFile = { addMenuOpen = false; filePicker.launch(arrayOf("*/*")) },
                                 planModeAvailable = planModeAvailable,
                                 onOpen = { addMenuOpen = true },
                                 onDismiss = { addMenuOpen = false },
@@ -2759,6 +2817,7 @@ private fun Composer(
                         }
                         ContextUsageRing(
                             usage = state.threadTokenUsage,
+                            compacting = state.contextCompactionStatus == "inProgress",
                             onClick = onShowStatus,
                             modifier = Modifier.testTag("composer-context"),
                         )
@@ -2830,7 +2889,7 @@ private fun Composer(
                                         }
                                     }
                                 },
-                                enabled = sendEnabled && if (goalModeActive || inlineGoalObjective != null) {
+                                enabled = sendEnabled && !attaching && if (goalModeActive || inlineGoalObjective != null) {
                                     text.text.isNotBlank() && !state.isTurnRunning && !state.isGoalLoading
                                 } else {
                                     (text.text.isNotBlank() || attachments.isNotEmpty() || state.isTurnRunning) &&
@@ -2854,6 +2913,8 @@ private fun Composer(
         RemotePathPickerDialog(
             state = state,
             projectRoot = cwd,
+            directoriesOnly = true,
+            selectProject = false,
             onNavigate = onLoadRemoteDirectory,
             onSelect = { path ->
                 insertAtCursor("${remotePathComposerToken(cwd, path)} ")
@@ -2877,6 +2938,8 @@ private fun ComposerAddMenu(
     plugins: List<ComposerMentionOption>,
     canBrowseRemoteFiles: Boolean,
     canAttachImage: Boolean,
+    localWorkspace: Boolean,
+    onAttachFile: () -> Unit,
     planModeAvailable: Boolean,
     onOpen: () -> Unit,
     onDismiss: () -> Unit,
@@ -2904,10 +2967,17 @@ private fun ComposerAddMenu(
             )
             AddMenuItem(
                 icon = Icons.Outlined.FolderOpen,
-                title = uiText(R.string.ui_115, "文件和文件夹"),
-                description = uiText(R.string.ui_116, "选择远端项目中的路径"),
+                title = uiText(R.string.attach_folder, "Folder"),
+                description = uiText(if (localWorkspace) R.string.attach_folder_local else R.string.attach_folder_remote, "Choose a folder in the connected workspace"),
                 enabled = canBrowseRemoteFiles,
                 onClick = onBrowseRemoteFiles,
+            )
+            AddMenuItem(
+                icon = Icons.Outlined.Description,
+                title = uiText(R.string.attach_phone_file, "Phone file"),
+                description = uiText(R.string.attach_file_transfer, "Transfer a file from this phone"),
+                enabled = canAttachImage,
+                onClick = onAttachFile,
             )
             AddMenuItem(
                 icon = Icons.Outlined.Image,
@@ -2998,6 +3068,7 @@ private fun RemotePathPickerDialog(
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit,
     directoriesOnly: Boolean = false,
+    selectProject: Boolean = true,
     onCreateDirectory: (String, String) -> Unit = { _, _ -> },
 ) {
     val currentPath = state.remoteDirectoryPath ?: projectRoot
@@ -3008,11 +3079,11 @@ private fun RemotePathPickerDialog(
         runCatching { com.codex.remote.data.rpc.remoteDirectoryChildPath(currentPath, folderName) }.isSuccess
     }
     val parentPath = remoteParentPath(currentPath)?.takeIf { parent ->
-        remotePathIsWithinRoot(projectRoot, parent)
+        directoriesOnly || remotePathIsWithinRoot(projectRoot, parent)
     }
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (directoriesOnly) uiText(R.string.choose_project_folder, "Choose a project folder") else uiText(R.string.ui_115, "文件和文件夹")) },
+        title = { Text(if (directoriesOnly && selectProject) uiText(R.string.choose_project_folder, "Choose a project folder") else uiText(R.string.attach_folder, "Folder")) },
         text = {
             Column {
                 if (directoriesOnly) {
@@ -3020,7 +3091,7 @@ private fun RemotePathPickerDialog(
                         modifier = Modifier.testTag("remote-project-path"), label = { Text(uiText(R.string.project_path, "Folder path")) })
                     Row {
                         TextButton(onClick = { onNavigate(pathInput.trim()) }, enabled = pathInput.isNotBlank() && !state.isRemoteDirectoryLoading) { Text(uiText(R.string.open_folder, "Open folder")) }
-                        TextButton(onClick = { creatingFolder = !creatingFolder }, enabled = pathInput.trim() == currentPath && !state.isRemoteDirectoryLoading && state.remoteDirectoryError == null,
+                        if (selectProject) TextButton(onClick = { creatingFolder = !creatingFolder }, enabled = pathInput.trim() == currentPath && !state.isRemoteDirectoryLoading && state.remoteDirectoryError == null,
                             modifier = Modifier.testTag("new-remote-folder")) { Text(uiText(R.string.new_folder, "New folder")) }
                     }
                     if (creatingFolder) {
@@ -3569,20 +3640,23 @@ private fun DeleteArchivedThreadDialog(
 @Composable
 internal fun RemoteStatusDialog(state: AppUiState, onDismiss: () -> Unit) {
     val usage = state.threadTokenUsage
-    val contextPercent = usage?.modelContextWindow?.takeIf { it > 0 }?.let { usage.totalTokens * 100.0 / it }
+    val contextPercent = usage?.contextTokens?.let { tokens -> usage.modelContextWindow?.takeIf { it > 0 }?.let { tokens * 100.0 / it } }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         containerColor = MaterialTheme.colorScheme.surface) {
         Column(Modifier.fillMaxWidth().heightIn(min = 380.dp).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp, vertical = 12.dp)) {
-            Text(uiText(R.string.ui_162, "Remote status"), style = MaterialTheme.typography.titleLarge)
+            Text(uiText(R.string.workspace_status, "工作状态"), style = MaterialTheme.typography.titleLarge)
             Spacer(Modifier.height(18.dp))
             StatusLine(uiText(R.string.ui_163, "Task ID"), state.selectedThreadId ?: uiText(R.string.ui_052, "New task"), monospace = true)
             StatusLine(uiText(R.string.ui_256, "Workspace"), state.selectedProjectPath.orEmpty(), monospace = true)
             StatusLine("Codex", state.remoteServer?.codexVersion?.ifBlank { uiText(R.string.ui_164, "Unknown") } ?: uiText(R.string.ui_164, "Unknown"))
             StatusLine(uiText(R.string.ui_165, "Model"), state.selectedModel ?: uiText(R.string.ui_164, "Unknown"))
+            state.contextCompactionStatus?.let { StatusLine(uiText(R.string.context_compaction, "上下文压缩"), compactionStatusLabel(it)) }
             StatusLine(uiText(R.string.ui_166, "Context"),
+                if (state.contextCompactionStatus == "inProgress") compactionStatusLabel("inProgress") else
                 contextPercent?.let { uiText(R.string.context_remaining, "%1\$d%% remaining · %2\$d / %3\$d tokens",
-                    (100 - it).toInt().coerceIn(0, 100), usage?.totalTokens ?: 0, usage?.modelContextWindow ?: 0) }
+                    (100 - it).toInt().coerceIn(0, 100), usage?.contextTokens ?: 0, usage?.modelContextWindow ?: 0) }
                     ?: uiText(R.string.ui_167, "Waiting for usage data"))
+            usage?.let { StatusLine(uiText(R.string.total_token_consumption, "累计消耗"), "${it.totalTokens} tokens") }
             Spacer(Modifier.height(18.dp))
             Text(uiText(R.string.remaining_limits, "Remaining limits"), style = MaterialTheme.typography.titleMedium)
             if (state.isStatusLoading) CircularProgressIndicator(Modifier.padding(vertical = 18.dp).size(22.dp), strokeWidth = 2.dp)
@@ -3774,11 +3848,12 @@ private fun PermissionDropdownItem(
 @Composable
 private fun ContextUsageRing(
     usage: RemoteThreadTokenUsage?,
+    compacting: Boolean = false,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val fraction = if (usage?.modelContextWindow != null && usage.modelContextWindow > 0) {
-        (usage.totalTokens.toFloat() / usage.modelContextWindow.toFloat()).coerceIn(0f, 1f)
+    val fraction = if (usage?.contextTokens != null && usage.modelContextWindow != null && usage.modelContextWindow > 0) {
+        (usage.contextTokens.toFloat() / usage.modelContextWindow.toFloat()).coerceIn(0f, 1f)
     } else {
         0f
     }
@@ -3792,10 +3867,10 @@ private fun ContextUsageRing(
     IconButton(
         onClick = onClick,
         modifier = modifier.size(32.dp).semantics {
-            contentDescription = if (usage == null) uiText(R.string.ui_190, "上下文用量尚不可用") else uiText(R.string.context_percent, "上下文已使用 %1\$d%%", percent)
+            contentDescription = if (compacting) compactionStatusLabel("inProgress") else if (usage?.contextTokens == null || usage.modelContextWindow == null || usage.modelContextWindow <= 0) uiText(R.string.ui_190, "上下文用量尚不可用") else uiText(R.string.context_percent, "上下文已使用 %1\$d%%", percent)
         },
     ) {
-        Canvas(Modifier.size(21.dp)) {
+        if (compacting) CircularProgressIndicator(Modifier.size(21.dp), strokeWidth = 2.2.dp) else Canvas(Modifier.size(21.dp)) {
             val stroke = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round)
             drawCircle(track, style = stroke)
             if (fraction > 0f) {
@@ -4120,14 +4195,15 @@ private fun ConnectionState(
 }
 
 @Composable
-private fun ApprovalDialog(
+internal fun ApprovalDialog(
     approval: com.codex.remote.domain.ApprovalRequest,
     onDecision: (String, Map<String, List<String>>) -> Unit,
+    submitting: Boolean = false,
 ) {
     val answers = remember(approval.requestId) {
         mutableStateMapOf<String, String>().apply {
             approval.questions.forEach { question ->
-                this[question.id] = question.options.firstOrNull().orEmpty()
+                this[question.id] = ""
             }
         }
     }
@@ -4141,19 +4217,18 @@ private fun ApprovalDialog(
         },
         title = { Text(approval.title) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(approval.detail, style = MaterialTheme.typography.bodyMedium)
+            Column(Modifier.fillMaxWidth().heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (approval.kind == ApprovalKind.USER_INPUT) {
                     approval.questions.forEach { question ->
                         if (question.header.isNotBlank()) {
                             Text(question.header, style = MaterialTheme.typography.labelLarge)
                         }
                         Text(question.question, style = MaterialTheme.typography.bodyMedium)
-                        question.options.forEach { option ->
+                        question.options.forEachIndexed { index, option ->
                             val selected = answers[question.id] == option
                             Row(
                                 modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
-                                    .selectable(selected = selected, onClick = { answers[question.id] = option })
+                                    .selectable(selected = selected, enabled = !submitting, role = androidx.compose.ui.semantics.Role.RadioButton, onClick = { answers[question.id] = option })
                                     .background(if (selected) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent)
                                     .padding(10.dp),
                                 verticalAlignment = Alignment.CenterVertically,
@@ -4161,14 +4236,22 @@ private fun ApprovalDialog(
                                 if (selected) Icon(Icons.Outlined.Check, contentDescription = null, modifier = Modifier.size(17.dp))
                                 else Spacer(Modifier.width(17.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text(option)
+                                Column {
+                                    Text(option)
+                                    question.optionDescriptions.getOrNull(index)?.takeIf { it.isNotBlank() }?.let {
+                                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
                             }
                         }
                         OutlinedTextField(
                             value = answers[question.id].orEmpty(),
                             onValueChange = { answers[question.id] = it },
-                            label = { Text(uiText(R.string.ui_228, "Response")) },
-                            modifier = Modifier.fillMaxWidth(),
+                            label = { Text(uiText(R.string.question_answer, "Your answer")) },
+                            enabled = !submitting,
+                            visualTransformation = if (question.isSecret) androidx.compose.ui.text.input.PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = if (question.isSecret) androidx.compose.ui.text.input.KeyboardType.Password else androidx.compose.ui.text.input.KeyboardType.Text),
+                            modifier = Modifier.fillMaxWidth().testTag("question-answer-${question.id}"),
                         )
                     }
                 } else {
@@ -4183,13 +4266,13 @@ private fun ApprovalDialog(
         confirmButton = {
             Button(onClick = {
                 onDecision("accept", answers.mapValues { listOf(it.value) })
-            }, enabled = approval.kind != ApprovalKind.USER_INPUT || answers.values.all { it.isNotBlank() }) {
+            }, modifier = Modifier.testTag("question-submit"), enabled = !submitting && (approval.kind != ApprovalKind.USER_INPUT || answers.isNotEmpty() && answers.values.all { it.isNotBlank() })) {
                 Text(if (approval.kind == ApprovalKind.USER_INPUT) uiText(R.string.ui_146, "Send") else uiText(R.string.ui_229, "Allow once"))
             }
         },
         dismissButton = {
             Row {
-                TextButton(onClick = { onDecision("decline", emptyMap()) }) { Text(uiText(R.string.ui_230, "Deny")) }
+                TextButton(enabled = !submitting, onClick = { onDecision("decline", emptyMap()) }) { Text(uiText(if (approval.kind == ApprovalKind.USER_INPUT) R.string.question_skip else R.string.ui_230, "Skip")) }
                 if (approval.kind == ApprovalKind.COMMAND || approval.kind == ApprovalKind.FILE_CHANGE) {
                     TextButton(onClick = { onDecision("acceptForSession", emptyMap()) }) { Text(uiText(R.string.ui_231, "Allow session")) }
                 }
@@ -4333,32 +4416,4 @@ private fun formatThreadTime(epochSeconds: Long): String {
 }
 
 
-private fun readComposerImageAttachment(context: Context, uri: Uri): ComposerImageAttachment {
-    val resolver = context.contentResolver
-    val mimeType = resolver.getType(uri)?.takeIf { it.startsWith("image/") }
-        ?: throw IllegalArgumentException(uiText(R.string.ui_247, "Only image attachments are supported"))
-    var displayName = "image"
-    var declaredSize: Long? = null
-    resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
-        if (cursor.moveToFirst()) {
-            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-            if (nameIndex >= 0) displayName = cursor.getString(nameIndex)?.takeIf(String::isNotBlank) ?: displayName
-            val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
-            if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) declaredSize = cursor.getLong(sizeIndex)
-        }
-    }
-    if (declaredSize != null && declaredSize!! > MAX_COMPOSER_IMAGE_BYTES) {
-        throw IllegalArgumentException(uiText(R.string.ui_248, "Image must be 20 MB or smaller"))
-    }
-    val bytes = resolver.openInputStream(uri)?.use { it.readBytes() }
-        ?: throw IllegalArgumentException(uiText(R.string.ui_249, "Unable to read selected image"))
-    if (bytes.size > MAX_COMPOSER_IMAGE_BYTES) throw IllegalArgumentException(uiText(R.string.ui_248, "Image must be 20 MB or smaller"))
-    return ComposerImageAttachment(
-        displayName = displayName,
-        mimeType = mimeType,
-        dataUrl = "data:$mimeType;base64,${Base64.encodeToString(bytes, Base64.NO_WRAP)}",
-    )
-}
-
 private const val MAX_COMPOSER_IMAGES = 4
-private const val MAX_COMPOSER_IMAGE_BYTES = 20 * 1024 * 1024

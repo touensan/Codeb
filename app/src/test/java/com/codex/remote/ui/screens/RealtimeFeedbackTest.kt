@@ -1,12 +1,27 @@
 package com.codex.remote.ui.screens
 
 import com.codex.remote.withConversation
+import com.codex.remote.withCompactionStatus
 import com.codex.remote.data.rpc.remoteDirectoryChildPath
 import com.codex.remote.domain.*
 import org.junit.Assert.*
 import org.junit.Test
 
 class RealtimeFeedbackTest {
+    @Test fun compactionKeepsFreshUsageWhenCompletionFollowsTokenUpdate() {
+        val usage = com.codex.remote.domain.RemoteThreadTokenUsage(614497, 600000, 14497, 258400, 200000)
+        val running = AppUiState(selectedThreadId = "a", threadTokenUsage = usage).withCompactionStatus("inProgress")
+        assertNull(running.threadTokenUsage!!.contextTokens)
+        assertEquals(614497L, running.threadTokenUsage!!.totalTokens)
+        val fresh = running.copy(threadTokenUsage = usage.copy(contextTokens = 52000)).withCompactionStatus("inProgress")
+        assertEquals(52000L, fresh.threadTokenUsage!!.contextTokens)
+        assertEquals(52000L, fresh.withCompactionStatus("completed").threadTokenUsage!!.contextTokens)
+        assertNull(running.withCompactionStatus("completed").threadTokenUsage!!.contextTokens)
+        val failed = running.copy(isTurnRunning = true, activeTurnId = "t")
+            .withTurnRunning("a", "t", false, 1000, 2000)
+        assertEquals("failed", failed.contextCompactionStatus)
+    }
+
     @Test fun liveTaskStatusSurvivesAnIdleIndexAndClearsAfterCompletionOrStop() {
         val idle = RemoteThread("a", "A", "/work", 1, "idle")
         val other = idle.copy(id = "b")

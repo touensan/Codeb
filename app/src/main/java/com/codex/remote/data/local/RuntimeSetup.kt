@@ -21,7 +21,7 @@ object RuntimeSetup {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context, intent: Intent) {
                 val data = intent.getBundleExtra("result") ?: return
-                val output = data.getString("stdout").orEmpty().take(6000)
+                val output = data.getString("stdout").orEmpty().takeLast(6000)
                 if(data.getInt("exitCode",-1)==0 && data.getInt("err",android.app.Activity.RESULT_OK)==android.app.Activity.RESULT_OK) result.complete(output)
                 else result.completeExceptionally(IllegalStateException((output+"\n"+data.getString("stderr").orEmpty()+"\n"+data.getString("errmsg").orEmpty()).trim().take(6000)))
             }
@@ -48,7 +48,7 @@ object RuntimeSetup {
                 putExtra("com.termux.RUN_COMMAND_BACKGROUND",true)
                 putExtra("com.termux.RUN_COMMAND_PENDING_INTENT",callback)
             })
-            return withTimeout(if(install) 300_000 else if(statusOnly) 8_000 else 25_000) {result.await()}.also {if(root&&!statusOnly)check(it.lineSequence().any {line -> line.trim()=="Root UID: 0"}) {"Root authorization did not return UID 0"}}
+            return withTimeout(if(install) 900_000 else if(statusOnly) 8_000 else 25_000) {result.await()}.also {if(root&&!statusOnly)check(it.lineSequence().any {line -> line.trim()=="Root UID: 0"}) {"Root authorization did not return UID 0"}}
         } finally {callback.cancel();context.unregisterReceiver(receiver)}
     }
 }

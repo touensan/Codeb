@@ -77,6 +77,7 @@ fun CodexRemoteApp(manager: AppViewModel, local: LocalViewModel = viewModel()) {
     val localState by local.state.collectAsState()
     val context = LocalContext.current
     var mode by rememberSaveable { mutableStateOf("chat") }
+    var beforeMarket by rememberSaveable { mutableStateOf("chat") }
     val returnToChat by com.codex.remote.data.local.PhoneControl.returnToChat.collectAsState()
     LaunchedEffect(returnToChat){if(returnToChat>0)mode="work"}
     var dailyFiles by remember {mutableStateOf(false)}
@@ -154,6 +155,7 @@ fun CodexRemoteApp(manager: AppViewModel, local: LocalViewModel = viewModel()) {
         NavigationDrawerItem(label = { Text(uiText(R.string.mode_daily, "Daily")) }, selected = mode == "chat", icon = { Icon(Icons.Outlined.ChatBubbleOutline, null) }, onClick = { select("chat") }, modifier = Modifier.testTag("mode-daily"))
         NavigationDrawerItem(label = { Text(uiText(R.string.mode_work, "Work")) }, selected = mode == "work", icon = { Icon(Icons.Outlined.PhoneAndroid, null) }, onClick = { select("work") }, modifier = Modifier.testTag("mode-work"))
         NavigationDrawerItem(label = { Text(uiText(R.string.mode_remote, "Remote Codex")) }, selected = mode == "remote", icon = { Icon(Icons.Outlined.Terminal, null) }, onClick = { select("remote") })
+        NavigationDrawerItem(label = { Text(uiText(R.string.skills_market, "Skills market")) }, selected = mode == "skills", icon = { Icon(Icons.Outlined.Extension, null) }, onClick = { beforeMarket = mode; select("skills") }, modifier = Modifier.testTag("mode-skills"))
         NavigationDrawerItem(label = { Text(uiText(R.string.ui_227, "Connections")) }, selected = false, icon = { Icon(Icons.Outlined.Link, null) }, onClick = { manager.showConnections(true); select("remote") })
         NavigationDrawerItem(label = { Text(uiText(R.string.ui_253, "Settings")) }, selected = false, icon = { Icon(Icons.Outlined.Settings, null) }, onClick = { settings = true; local.refresh(); closeDrawer(); scope.launch { drawer.close() } })
     }
@@ -227,6 +229,22 @@ fun CodexRemoteApp(manager: AppViewModel, local: LocalViewModel = viewModel()) {
     AnimatedContent(mode, transitionSpec={
         (fadeIn(tween(180))+slideInHorizontally(tween(200)){it/14}) togetherWith fadeOut(tween(100))
     },label="codeb-mode") { visibleMode ->
+    if (visibleMode == "skills") {
+        val standard: AppViewModel = viewModel(viewModelStoreOwner = HostSessions, key = "local-standard", factory = localFactory(context.applicationContext as Application))
+        val root: AppViewModel = viewModel(viewModelStoreOwner = HostSessions, key = "local-root", factory = localFactory(context.applicationContext as Application))
+        val phone = uiText(R.string.mode_work, "Local CodeB")
+        val targets = linkedMapOf(phone to standard, "$phone · Root" to root).apply { putAll(hostModels) }
+        val prefs = context.getSharedPreferences("phone-work", 0)
+        val available = localState.providers.filter { it.enabled && it.protocol == com.codex.remote.data.store.ApiProtocol.RESPONSES && it.models.isNotEmpty() }
+        val provider = available.firstOrNull { it.id == prefs.getString("provider", localState.providerId) } ?: available.firstOrNull()
+        val localConnections = mapOf(phone to "standard", "$phone · Root" to "root").mapValues { (name, access) ->
+            com.codex.remote.domain.SavedConnection(id = "phone-$access", name = name, host = "localhost", username = access,
+                authType = com.codex.remote.domain.AuthType.PASSWORD, localAccess = access, localProviderId = provider?.id)
+        }
+        val preferred = if (beforeMarket == "remote") connection?.id else if (prefs.getString("access", "standard") == "root") "$phone · Root" else phone
+        SkillMarketScreen(targets, preferred, localConnections, onLocalSetup = { navigate("work") }) { navigate(beforeMarket.takeUnless { it == "skills" } ?: "chat") }
+        return@AnimatedContent
+    }
     if (visibleMode == "work") {
         LocalWorkScreen(localState.providers, localState.providerId, onBack = { navigate("chat") },
             onSettings = { settings = true; local.refresh() }, navigation = { navigation { } }, sidebar = sidebar)
@@ -326,7 +344,7 @@ private fun HostOverview(hosts: List<SavedConnection>, live: Map<String, AppUiSt
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, openSettings: () -> Unit) {
+internal fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, openSettings: () -> Unit) {
     val state by viewModel.state.collectAsState()
     val context = LocalContext.current
     var addMenu by remember { mutableStateOf(false) }
@@ -497,7 +515,7 @@ private fun LocalPane(viewModel: LocalViewModel, workspace: Boolean, openSetting
                     Spacer(Modifier.weight(1f))
                     if (state.loading) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                     Box {
-                        TextButton(onClick = { if (provider == null) openSettings() else modelsOpen = true }, enabled = !state.sending, modifier = Modifier.widthIn(max = 230.dp)) {
+                        TextButton(onClick = { if (provider == null) openSettings() else modelsOpen = true }, modifier = Modifier.widthIn(max = 230.dp).testTag("daily-model")) {
                             Text(provider?.let { modelSettingsSummary(it.selectedModel, it.effort.takeIf(String::isNotBlank), null) }
                                 ?: uiText(R.string.ui_261, "Add API provider"), fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Icon(Icons.Outlined.KeyboardArrowDown, null, Modifier.size(16.dp))

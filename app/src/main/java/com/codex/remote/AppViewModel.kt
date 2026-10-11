@@ -1,5 +1,7 @@
 package com.codex.remote
 
+import kotlinx.serialization.json.*
+
 import com.codex.remote.R
 import com.codex.remote.ui.uiText
 
@@ -135,6 +137,58 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
 
     fun phoneFiles(): com.codex.remote.data.local.PhoneFiles {
         return com.codex.remote.data.local.PhoneFiles(getApplication(), "/", rpc ?: error("Phone workspace is offline"))
+    }
+
+    suspend fun marketSkills(action: String, skill: com.codex.remote.data.api.MarketSkill? = null,
+        id: String? = skill?.id, expectedSha256: String? = null): kotlinx.serialization.json.JsonObject {
+        require(action in listOf("list", "install", "remove"))
+        if (action == "install") requireNotNull(skill).validate()
+        val client = rpc ?: error("Connect to Local CodeB or an SSH server first")
+        val connection = _state.value.activeConnection ?: error("Workspace is offline")
+        val payload = buildJsonObject {
+            put("action", action)
+            id?.let { put("id", it) }
+            expectedSha256?.let { put("expectedSha256", it) }
+            skill?.let { put("version", it.version); put("content", it.content); put("sha256", it.sha256) }
+        }
+        val script = getApplication<Application>().assets.open("codeb-skills.py").bufferedReader().use { it.readText() }
+        val command = if (connection.localAccess != null) {
+            val python = "/data/data/com.termux/files/usr/bin/python"
+            if (connection.localAccess == "root") listOf("${com.codex.remote.data.local.TERMUX_HOME}/.local/share/codeb/bin/codeb-termux", python)
+            else listOf(python)
+        } else listOf("python3")
+        // Stream the document after the Termux command header; large skills must not exceed its header limit.
+        val runner = command.joinToString(" ") { com.codex.remote.data.local.shellQuote(it) }
+        val arguments = listOf(if (connection.localAccess != null) "/data/data/com.termux/files/usr/bin/bash" else "sh",
+            "-c", "skill_script=\$1; shift; printf '%s' \"\$@\" | $runner -c \"\$skill_script\"", "codeb-skills", script) + java.util.Base64.getEncoder()
+            .encodeToString(payload.toString().toByteArray(Charsets.UTF_8)).chunked(16000)
+        val result = client.request("command/exec", buildJsonObject {
+            put("command", kotlinx.serialization.json.JsonArray(arguments.map { kotlinx.serialization.json.JsonPrimitive(it) }))
+            put("cwd", if (connection.localAccess != null) com.codex.remote.data.local.TERMUX_HOME else "/")
+            put("sandboxPolicy", buildJsonObject { put("type", "dangerFullAccess") })
+            put("outputBytesCap", 262144)
+        })
+        check(result["exitCode"]?.jsonPrimitive?.int == 0) { result["stderr"]?.jsonPrimitive?.content?.take(1000) ?: "Skill operation failed" }
+        check(rpc === client && _state.value.activeConnection?.id == connection.id) { "Connection changed; refresh the target" }
+        if (action != "list") refreshComposerCatalog(forceReload = true)
+        return kotlinx.serialization.json.Json.parseToJsonElement(result["stdout"]!!.jsonPrimitive.content).jsonObject
+    }
+
+    suspend fun importWorkspaceAttachment(uri: android.net.Uri, imageOnly: Boolean): ComposerImageAttachment {
+        val client = rpc ?: error("Workspace is offline")
+        val state = _state.value
+        val cwd = state.threads.firstOrNull { it.id == state.selectedThreadId }?.cwd?.takeIf { it.isNotBlank() }
+            ?: state.selectedProjectPath ?: error("Select a project first")
+        val attachment = com.codex.remote.data.local.readWorkspaceAttachment(getApplication(), uri, imageOnly)
+        val files = com.codex.remote.data.local.PhoneFiles(getApplication(), "/", client)
+        // A unique directory prevents attachments from replacing project files, including on retries.
+        val directory = com.codex.remote.data.rpc.remoteDirectoryChildPath(cwd, ".codeb-attachment-${attachment.id}")
+        files.mkdir(directory)
+        val path = com.codex.remote.data.rpc.remoteDirectoryChildPath(directory, attachment.displayName)
+        val bytes = java.util.Base64.getDecoder().decode(attachment.dataUrl.substringAfter(','))
+        files.save(path, bytes, null)
+        check(rpc === client && _state.value.activeConnection?.id == state.activeConnection?.id) { "Connection changed; select the attachment again" }
+        return attachment.copy(uploadedPath = path, dataUrl = "")
     }
 
     private var rpc: CodexRpcClient? = null
@@ -323,7 +377,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     isFeedbackSubmitting = false,
                     feedbackError = null,
                     rateLimits = null,
-                    threadTokenUsage = null,
+                    threadTokenUsage = null, contextCompactionStatus = null,
                     isStatusLoading = false,
                     statusError = null,
                     pendingHostKeyFingerprint = null,
@@ -528,14 +582,14 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 isFeedbackSubmitting = false,
                 feedbackError = null,
                 rateLimits = null,
-                threadTokenUsage = null,
+                threadTokenUsage = null, contextCompactionStatus = null,
                 isStatusLoading = false,
                 statusError = null,
                 isTurnRunning = false,
                 turnStartedAt = 0,
                 failedSend = null,
                 activeTurnId = null,
-                pendingApproval = null,
+                pendingApproval = null, queuedApprovals = emptyList(), isApprovalSubmitting = false,
                 pendingHostKeyFingerprint = null,
             )
         }
@@ -578,7 +632,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     isBusy = false,
                     isGoalLoading = false,
                     goalError = null,
-                    threadTokenUsage = null,
+                    threadTokenUsage = null, contextCompactionStatus = null,
                     timeline = emptyList(),
                     olderHistoryCursor = null,
                     hasOlderHistory = false,
@@ -619,7 +673,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 threadGoal = null,
                 isGoalLoading = false,
                 goalError = null,
-                threadTokenUsage = null,
+                threadTokenUsage = null, contextCompactionStatus = null,
                 timeline = emptyList(),
                 olderHistoryCursor = null,
                 hasOlderHistory = false,
@@ -664,7 +718,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     threadGoal = null,
                     isGoalLoading = true,
                     goalError = null,
-                    threadTokenUsage = null,
+                    threadTokenUsage = null, contextCompactionStatus = null,
                     timeline = initialTimeline,
                     olderHistoryCursor = null,
                     hasOlderHistory = false,
@@ -721,6 +775,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                 state.copy(
                     // Keep live events received after resume, while refreshing stale disk items.
                     timeline = mergeTimelineHistory(restoredTimeline, session.timeline.map { liveItems[it.id]?.preservingTurnMetadata(it) ?: it }),
+                    contextCompactionStatus = state.contextCompactionStatus ?: session.timeline.lastOrNull { it.kind == TimelineKind.COMPACTION }?.status?.takeIf(String::isNotBlank),
                     olderHistoryCursor = session.olderHistoryCursor,
                     hasOlderHistory = session.olderHistoryCursor != null,
                     isOlderHistoryLoading = false,
@@ -930,7 +985,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     append(prompt)
                     attachments.forEach { attachment ->
                         if (isNotEmpty()) append('\n')
-                        append("[Image: ${attachment.displayName}]")
+                        append("[${if (attachment.mimeType.startsWith("image/")) "Image" else "File"}: ${attachment.displayName}]")
                     }
                 },
                 isGoal = asGoal,
@@ -1189,10 +1244,15 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
             _state.update { it.copy(notice = uiText(R.string.ui_312, "任务运行期间不能压缩上下文")) }
             return
         }
+        if (_state.value.contextCompactionStatus == "inProgress") return
+        updateThreadState(threadId) { it.withCompactionStatus("inProgress") }
         viewModelScope.launch {
             runCatching { client.compactThread(threadId) }
-                .onSuccess { _state.update { it.copy(notice = uiText(R.string.ui_313, "正在压缩任务上下文")) } }
-                .onFailure(::showError)
+                .onFailure { error ->
+                    if (rpc === client) updateThreadState(threadId) {
+                        it.withCompactionStatus("failed").copy(notice = friendlyError(error))
+                    }
+                }
         }
     }
 
@@ -1233,7 +1293,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         threadGoal = null,
                         isGoalLoading = false,
                         goalError = null,
-                        threadTokenUsage = null,
+                        threadTokenUsage = null, contextCompactionStatus = null,
                         timeline = forked.session.timeline,
                         olderHistoryCursor = forked.session.olderHistoryCursor,
                         hasOlderHistory = forked.session.olderHistoryCursor != null,
@@ -1534,7 +1594,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         if (revokePhone && snapshot.activeConnection?.localAccess != null) com.codex.remote.data.local.PhoneControl.stop()
         _state.update { it.withTurnRunning(threadId, snapshot.activeTurnId, false,
             android.os.SystemClock.elapsedRealtime(), System.currentTimeMillis()).copy(
-            isTurnRunning = false, activeTurnId = null, turnStartedAt = 0, pendingApproval = null, stopRequested = true,
+            isTurnRunning = false, activeTurnId = null, turnStartedAt = 0, pendingApproval = null, queuedApprovals = emptyList(), isApprovalSubmitting = false, stopRequested = true,
             notice = uiText(R.string.task_stopped, "Stopped")) }
         rememberThread()
         val client = rpc ?: return
@@ -1568,10 +1628,19 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
     fun respondToApproval(decision: String, answers: Map<String, List<String>> = emptyMap()) {
         val approval = _state.value.pendingApproval ?: return
         val client = rpc ?: return
+        if (_state.value.isApprovalSubmitting) return
+        val threadId = _state.value.selectedThreadId
+        _state.update { it.copy(isApprovalSubmitting = true) }
         viewModelScope.launch {
-            runCatching { client.respondToApproval(approval, decision, answers) }
-                .onSuccess { _state.update { it.copy(pendingApproval = null) } }
-                .onFailure(::showError)
+            try {
+                client.respondToApproval(approval, decision, answers)
+                if (rpc === client) updateThreadState(threadId) { it.resolveApproval(approval.originalId, approval.requestId) }
+            } catch (error: Exception) {
+                if (error is CancellationException) throw error
+                showError(error)
+            } finally {
+                if (rpc === client) updateThreadState(threadId) { it.copy(isApprovalSubmitting = false) }
+            }
         }
     }
 
@@ -1777,8 +1846,13 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         }
                     }
                     is AppServerEvent.Approval -> updateThreadState(event.threadId) { state ->
-                        if (!state.stopRequested && state.acceptsThreadEvent(event.threadId)) state.copy(pendingApproval = event.request) else state
+                        if (!state.stopRequested && state.acceptsThreadEvent(event.threadId)) {
+                            if (state.pendingApproval == null) state.copy(pendingApproval = event.request)
+                            else if (state.pendingApproval.originalId == event.request.originalId || state.queuedApprovals.any { it.originalId == event.request.originalId }) state
+                            else state.copy(queuedApprovals = state.queuedApprovals + event.request)
+                        } else state
                     }
+                    is AppServerEvent.ApprovalResolved -> updateThreadState(event.threadId) { it.resolveApproval(event.originalId, event.requestId) }
                     AppServerEvent.AccountChanged -> refreshRemoteAccount()
                     AppServerEvent.ThreadsChanged -> refreshThreads()
                     AppServerEvent.SkillsChanged -> refreshComposerCatalog(forceReload = true)
@@ -1809,14 +1883,15 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                         it.copy(rateLimits = event.rateLimits, isStatusLoading = false, statusError = null)
                     }
                     is AppServerEvent.ContextCompacted -> {
-                        if (_state.value.selectedThreadId == event.threadId) {
-                            _state.update { state ->
+                        updateThreadState(event.threadId) { state ->
+                            if (state.contextCompactionStatus == "completed") state else {
                                 val marker = TimelineItem(
                                     id = "compaction-${UUID.randomUUID()}",
                                     kind = TimelineKind.COMPACTION,
                                     title = uiText(R.string.ui_094, "Context compacted"),
+                                    status = "completed",
                                 )
-                                state.copy(timeline = state.timeline + marker, notice = uiText(R.string.ui_329, "任务上下文已压缩"))
+                                state.copy(timeline = state.timeline + marker).withCompactionStatus("completed")
                             }
                         }
                     }
@@ -1869,6 +1944,7 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                             state.withTurnRunning(event.threadId, state.activeTurnId, false,
                                 android.os.SystemClock.elapsedRealtime(), System.currentTimeMillis()).copy(
                                 notice = event.message,
+                                contextCompactionStatus = if (state.contextCompactionStatus == "inProgress") "failed" else state.contextCompactionStatus,
                             )
                         } else {
                             state
@@ -1877,7 +1953,8 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
                     is AppServerEvent.Warning -> _state.update { it.copy(notice = event.message) }
                     AppServerEvent.ConnectionLost -> {
                         rememberThread()
-                        _state.update { it.copy(connectionStatus = ConnectionStatus.ERROR, connectionMessage = uiText(R.string.ui_079, "Disconnected")) }
+                        _state.update { it.copy(connectionStatus = ConnectionStatus.ERROR, connectionMessage = uiText(R.string.ui_079, "Disconnected"),
+                            contextCompactionStatus = if (it.contextCompactionStatus == "inProgress") "failed" else it.contextCompactionStatus) }
                     }
                     is AppServerEvent.Diagnostic -> {
                         if (event.message.contains("not found", ignoreCase = true) ||
@@ -1968,10 +2045,11 @@ class AppViewModel(application: Application, private val managerOnly: Boolean = 
         val localUserIndex = if (item.kind == TimelineKind.USER) {
             state.timeline.indexOfLast { it.id.startsWith("local-") && it.kind == TimelineKind.USER && it.status != "sendFailed" && it.body == item.body && (it.turnId == null || it.turnId == update.turnId) }
         } else -1
-        if (index < 0 && localUserIndex >= 0) {
+        val updated = if (index < 0 && localUserIndex >= 0) {
             state.copy(timeline = state.timeline.toMutableList().also { it[localUserIndex] = update })
         } else if (index < 0) state.copy(timeline = state.timeline + update)
         else state.copy(timeline = state.timeline.toMutableList().also { it[index] = update })
+        if (update.kind == TimelineKind.COMPACTION) updated.withCompactionStatus(update.status) else updated
     }
 
     private fun appendDelta(threadId: String?, id: String, delta: String, kind: TimelineKind) =
@@ -2120,7 +2198,8 @@ internal fun AppUiState.withConversation(saved: AppUiState): AppUiState = copy(
     selectedServiceTier = saved.selectedServiceTier, selectedCollaborationMode = saved.selectedCollaborationMode,
     selectedPermissionProfile = saved.selectedPermissionProfile, approvalPolicy = saved.approvalPolicy,
     approvalsReviewer = saved.approvalsReviewer, pendingApproval = saved.pendingApproval,
-    threadGoal = saved.threadGoal, threadTokenUsage = saved.threadTokenUsage,
+    queuedApprovals = saved.queuedApprovals, isApprovalSubmitting = saved.isApprovalSubmitting,
+    threadGoal = saved.threadGoal, threadTokenUsage = saved.threadTokenUsage, contextCompactionStatus = saved.contextCompactionStatus,
     failedSend = saved.failedSend, isReadOnlyThread = saved.isReadOnlyThread, isBusy = false, stopRequested = saved.stopRequested,
     isGoalLoading = false, goalError = null,
 )
@@ -2213,3 +2292,16 @@ private val INIT_PROMPT = """
 """.trimIndent()
 
 private val BUILT_IN_PERMISSION_PROFILES = setOf(":workspace", ":danger-full-access", ":read-only")
+
+internal fun AppUiState.resolveApproval(originalId: String?, requestId: String): AppUiState {
+    val remaining = (listOfNotNull(pendingApproval) + queuedApprovals).filterNot {
+        if (originalId != null) it.originalId == originalId else it.requestId == requestId
+    }
+    return copy(pendingApproval = remaining.firstOrNull(), queuedApprovals = remaining.drop(1))
+}
+
+internal fun AppUiState.withCompactionStatus(status: String): AppUiState = copy(
+    contextCompactionStatus = status,
+    threadTokenUsage = if (status == "inProgress" && contextCompactionStatus != "inProgress")
+        threadTokenUsage?.copy(contextTokens = null) else threadTokenUsage,
+)

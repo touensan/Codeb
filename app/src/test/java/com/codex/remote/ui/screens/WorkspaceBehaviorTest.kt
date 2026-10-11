@@ -11,6 +11,42 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class WorkspaceBehaviorTest {
+    @Test fun commandFailuresKeepPerStepResultsAndAvoidShellPathsInTitles() {
+        val shell = TimelineItem("c1", TimelineKind.COMMAND,
+            title = "/data/data/com.termux/files/usr/bin/bash -lc 'pkg install demo'", body = "Package unavailable", status = "failed", exitCode = 42)
+        val good = shell.copy(id = "c2", title = "pwd", status = "completed", exitCode = 0, body = "/work")
+        val row = groupConsecutiveCommands(listOf(shell, good)).single().item
+        assertEquals("partialFailure", row.status)
+        assertTrue(row.body.contains("42"))
+        assertTrue(row.body.contains("Package unavailable"))
+        assertTrue(row.body.contains("Completed"))
+        assertEquals("执行命令", commandTitle(shell))
+        assertEquals("pwd", commandTitle(good))
+        assertEquals("failed", groupConsecutiveCommands(listOf(shell, shell.copy(id = "c3"))).single().item.status)
+        assertEquals("inProgress", groupConsecutiveCommands(listOf(shell, good.copy(status = "inProgress"))).single().item.status)
+        assertEquals("interrupted", groupConsecutiveCommands(listOf(shell, good.copy(status = "interrupted"))).single().item.status)
+    }
+
+    @Test fun emptyReasoningNeverCreatesActivityOrSeparatesCommands() {
+        val rows = conversationPresentation(listOf(
+            TimelineItem("prompt", TimelineKind.USER, body = "Work", turnId = "t"),
+            TimelineItem("empty", TimelineKind.REASONING, status = "inProgress", turnId = "t"),
+            TimelineItem("cmd-1", TimelineKind.COMMAND, title = "pwd", turnId = "t"),
+            TimelineItem("blank", TimelineKind.REASONING, body = " \n\t", status = "completed", turnId = "t"),
+            TimelineItem("cmd-2", TimelineKind.COMMAND, title = "ls", turnId = "t"),
+            TimelineItem("summary", TimelineKind.REASONING, body = "Reported summary", turnId = "t"),
+            TimelineItem("answer", TimelineKind.AGENT, body = "Done", turnId = "t", elapsedMs = 1000),
+        ))
+        assertEquals(listOf("prompt", "command-group:cmd-1", "summary", "answer"), rows.map { it.item.id })
+        assertEquals(listOf("cmd-1", "cmd-2"), rows[1].sourceItemIds)
+        assertTrue(rows[1].startsActivity)
+        assertFalse(rows[2].startsActivity)
+        assertEquals(1000L, rows[1].turnElapsedMs)
+        assertTrue(conversationPresentation(listOf(
+            TimelineItem("empty", TimelineKind.REASONING, status = "completed")
+        )).isEmpty())
+    }
+
     @Test
     fun replyFooterKeepsFilesWithinTheirTurnAndSupportsLegacyHistory() {
         val firstFile = FileChangeSummary("src/First.kt", "update", "+first")

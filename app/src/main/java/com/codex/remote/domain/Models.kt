@@ -239,11 +239,13 @@ data class RemoteThreadSettingsSnapshot(
     val approvalsReviewer: String?,
 )
 
+@Serializable
 data class ComposerImageAttachment(
     val id: String = UUID.randomUUID().toString(),
     val displayName: String,
     val mimeType: String,
     val dataUrl: String,
+    val uploadedPath: String? = null,
 )
 
 data class RemoteServerInfo(
@@ -337,6 +339,7 @@ data class RemoteThreadTokenUsage(
     val inputTokens: Long,
     val outputTokens: Long,
     val modelContextWindow: Long?,
+    val contextTokens: Long? = null,
 )
 
 enum class ThreadGoalStatus {
@@ -387,6 +390,7 @@ data class TimelineItem(
     // Epoch milliseconds; absent when neither the server nor this client observed completion.
     val completedAt: Long? = null,
     val media: List<String> = emptyList(),
+    val exitCode: Long? = null,
 )
 
 internal fun TimelineItem.preservingTurnMetadata(previous: TimelineItem?): TimelineItem = copy(
@@ -394,6 +398,7 @@ internal fun TimelineItem.preservingTurnMetadata(previous: TimelineItem?): Timel
     turnId = turnId ?: previous?.turnId,
     elapsedMs = elapsedMs ?: previous?.elapsedMs,
     completedAt = completedAt ?: previous?.completedAt,
+    exitCode = exitCode ?: previous?.exitCode,
 )
 
 @Serializable
@@ -451,13 +456,15 @@ internal fun AppUiState.withTurnRunning(
         threads = index,
         projects = groupThreadsByProject(index, projects.map { it.path }),
         isTurnRunning = running,
+        contextCompactionStatus = if (!running && contextCompactionStatus == "inProgress") "failed" else contextCompactionStatus,
         turnStartedAt = if (running) startedAt else 0,
         activeTurnId = currentTurn.takeIf { running },
         timeline = timeline.mapIndexed { index, item ->
             val belongs = if (item.turnId != null) item.turnId == currentTurn else hasLiveBoundary && boundary >= 0 && index >= boundary
             if (!belongs) item else if (running) item.copy(turnId = currentTurn) else item.copy(
                 turnId = currentTurn,
-                status = if (listOf("inProgress", "in_progress", "running", "started").any { it.equals(item.status, ignoreCase = true) }) "completed" else item.status,
+                status = if (listOf("inProgress", "in_progress", "running", "started").any { it.equals(item.status, ignoreCase = true) })
+                    if (item.kind == TimelineKind.COMPACTION) "failed" else "completed" else item.status,
                 elapsedMs = reportedElapsedMs?.takeIf { it >= 0 } ?: item.elapsedMs ?: elapsed,
                 completedAt = reportedCompletedAt?.takeIf { it > 0 } ?: item.completedAt ?: wallClockNow,
             )
@@ -470,6 +477,8 @@ data class ApprovalQuestion(
     val header: String,
     val question: String,
     val options: List<String> = emptyList(),
+    val optionDescriptions: List<String> = emptyList(),
+    val isSecret: Boolean = false,
 )
 
 data class ApprovalRequest(
@@ -480,6 +489,7 @@ data class ApprovalRequest(
     val rawMethod: String,
     val rawParams: String = "{}",
     val questions: List<ApprovalQuestion> = emptyList(),
+    val originalId: String? = null,
 )
 
 enum class ConnectionStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
@@ -540,6 +550,7 @@ data class AppUiState(
     val feedbackError: String? = null,
     val rateLimits: RemoteRateLimits? = null,
     val threadTokenUsage: RemoteThreadTokenUsage? = null,
+    val contextCompactionStatus: String? = null,
     val isStatusLoading: Boolean = false,
     val statusError: String? = null,
     val approvalPolicy: String = "on-request",
@@ -547,6 +558,8 @@ data class AppUiState(
     val turnStartedAt: Long = 0,
     val activeTurnId: String? = null,
     val pendingApproval: ApprovalRequest? = null,
+    val queuedApprovals: List<ApprovalRequest> = emptyList(),
+    val isApprovalSubmitting: Boolean = false,
     val pendingHostKeyFingerprint: String? = null,
     val isRestoringLastConnection: Boolean = true,
     val showConnections: Boolean = false,
@@ -588,6 +601,7 @@ internal fun AppUiState.withThreadArchived(threadId: String): AppUiState {
         isGoalLoading = if (archivedSelectedThread) false else isGoalLoading,
         goalError = if (archivedSelectedThread) null else goalError,
         threadTokenUsage = if (archivedSelectedThread) null else threadTokenUsage,
+        contextCompactionStatus = if (archivedSelectedThread) null else contextCompactionStatus,
         timeline = if (archivedSelectedThread) emptyList() else timeline,
         olderHistoryCursor = if (archivedSelectedThread) null else olderHistoryCursor,
         hasOlderHistory = if (archivedSelectedThread) false else hasOlderHistory,

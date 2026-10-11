@@ -156,7 +156,6 @@ class LocalViewModel @JvmOverloads constructor(application: Application, private
     }
 
     fun provider(id: String) {
-        if (_state.value.sending) return
         if (id.isNotEmpty() && _state.value.providers.none { it.id == id && it.enabled }) return
         preferences.edit().putString("provider", id).apply()
         updateState { it.copy(providerId = id, selected = it.selected?.copy(providerId = id, model = "", effort = null)) }
@@ -258,10 +257,10 @@ class LocalViewModel @JvmOverloads constructor(application: Application, private
     }
 
     fun selectModel(model: String, effort: String = "") {
-        if (_state.value.sending) return
         val providerId = _state.value.providerId
         val catalog = _state.value.catalog ?: return
-        val provider = _state.value.providers.firstOrNull { it.id == providerId } ?: return
+        val provider = _state.value.providers.firstOrNull { it.id == providerId && it.enabled } ?: return
+        if (provider.models.none { it.id == model } && _state.value.selected?.model != model) return
         val configured = provider.copy(selectedModel = model, effort = effort).resolved(catalog)
         if (_state.value.selected == null) newConversation()
         updateState { it.copy(selected = it.selected?.copy(model = model, effort = configured.effort)) }

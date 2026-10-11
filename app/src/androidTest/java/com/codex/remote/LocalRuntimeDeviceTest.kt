@@ -79,9 +79,35 @@ class LocalRuntimeDeviceTest {
                         assertEquals(access == "root", output.contains("uid=0(root)"))
                         assertTrue(client.readArtifact(file, transport.cwd).decodeToString().contains("edited"))
                         val files=com.codex.remote.data.local.PhoneFiles(context,"/",client)
+                        val skillName="codeb-check-${java.util.UUID.randomUUID()}"
+                        val skillPath="${com.codex.remote.data.local.TERMUX_HOME}/.agents/skills/$skillName"
+                        val skillData=Base64.getEncoder().encodeToString("---\nname: $skillName\ndescription: Temporary native discovery check.\n---\nPrint SKILL_OK only when explicitly invoked.\n".toByteArray())
+                        val skillCommand="printf %s '$skillData' | codeb-termux bash -c 'mkdir -p \"$skillPath\"; base64 -d > \"$skillPath/SKILL.md\"'"
+                        try {
+                            val installed=client.request("command/exec",buildJsonObject {
+                                put("command",buildJsonArray {add("/data/data/com.termux/files/usr/bin/bash");add("-c");add(skillCommand)})
+                                put("cwd",transport.cwd);put("sandboxPolicy",buildJsonObject {put("type","dangerFullAccess")})
+                            })
+                            assertEquals(installed.toString(),0,installed["exitCode"]!!.jsonPrimitive.int)
+                            assertTrue("Official Codex must discover shared native skills",client.listSkills(listOf(transport.cwd),forceReload=true).any {it.name==skillName})
+                        } finally {runCatching {files.delete("$skillPath/SKILL.md");files.delete(skillPath)}}
+                        stage("$access native skill discovery and terminal stdin verified")
                         val folder="${transport.cwd}/codeb-files-check-${java.util.UUID.randomUUID()}"
                         files.mkdir(folder)
                         val managed="$folder/test.md"
+                        val launcher="$folder/shebang.py"
+                        files.save(launcher,"#!/usr/bin/env python3\nprint('SHEBANG_OK')\n".toByteArray(),null)
+                        val compatibility=withTimeout(60_000) { client.request("command/exec",buildJsonObject {
+                            put("command",buildJsonArray { add("/data/data/com.termux/files/usr/bin/bash");add("-lc");add("set -e; codeb-termux id -u; apt-get --version >/dev/null; codeb-termux python -c 'import bcrypt,PIL; print(\"NATIVE_SKILL_OK\")'; chmod 700 '$launcher'; '$launcher'") })
+                            put("cwd",transport.cwd);put("timeoutMs",60_000);put("sandboxPolicy",buildJsonObject {put("type","dangerFullAccess")})
+                        }) }
+                        assertEquals(compatibility.toString(),0,compatibility["exitCode"]!!.jsonPrimitive.int)
+                        val compatibilityOutput=compatibility["stdout"]!!.jsonPrimitive.content
+                        assertNotEquals("0",compatibilityOutput.lineSequence().first().trim())
+                        assertTrue(compatibilityOutput.contains("NATIVE_SKILL_OK"))
+                        assertTrue(compatibilityOutput.contains("SHEBANG_OK"))
+                        files.delete(launcher)
+                        stage("$access ordinary Termux commands, Python dependencies and env shebang verified")
                         files.save(managed,"# 文件测试\n".toByteArray(),null)
                         val before=files.read(managed)
                         assertTrue(files.list(folder).any {it.name=="test.md"})
