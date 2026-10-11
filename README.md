@@ -79,5 +79,9 @@ CODEX_REMOTE_KEY_PASSWORD
 保留上游 Git 历史及 [Apache-2.0 许可证](LICENSE)。历史上游标签不代表白云Codeb 的当前功能。
 这是社区客户端，与 OpenAI 无隶属或官方背书关系；Codex 和 OpenAI 商标归其各自权利人所有。
 
+## 社区
+
+友情链接：[LINUX DO](https://linux.do/)
+
 Codeb is an open-source native Android client for remote Codex over SSH, on-device Codex through Termux,
 and OpenAI-compatible API conversations. You can build and install the app yourself.
