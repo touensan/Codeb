@@ -9,7 +9,13 @@
 
 当前源码版本为 **0.2.17（versionCode 21）**。本机运行时的可运行检查见 `node tools/check-local-runtime.cjs`。
 
-官网下载和应用内更新已同步至 **0.2.27（versionCode 31）**，清单修订16，主包约4.7MB；环境包独立可选，最新成品功能见下方说明。公开源码和既有主程序 GitHub Release 仍为 0.2.17。
+官网下载和应用内更新已同步至 **0.2.28（versionCode 32）**，主包约4.7MB；新增问题反馈与诊断预览，历史更新说明更简洁。公开源码和既有主程序 GitHub Release 仍为 0.2.17。
+
+## 问题反馈与数据
+
+设置中的“反馈问题”可填写描述、查看诊断信息并发送到云端，成功后获得反馈编号。诊断只附带应用版本、设备信息和近期错误，不读取聊天、工作文件或密钥。
+
+基础安装与活跃统计默认开启，只使用随机安装标识、设备型号、系统和应用版本及最近活跃时间；保留旧版明确关闭过的选择。错误记录保存在手机本地，确认反馈后才上传。
 
 ## 固定下载与历史版本
 
@@ -68,7 +74,7 @@ ADB 入口只打开开发者选项：USB 调试确认、无线调试配对由用
 
 ## 安装与升级
 
-官网下载正式安装包为 [0.2.27](https://codeb.baiyun.si/downloads/codeb-0.2.27.apk)，约 4.7MB，可用同路径的 [.sha256](https://codeb.baiyun.si/downloads/codeb-0.2.27.apk.sha256) 校验，应用内检查更新同步提供升级。[GitHub 既有主程序 Release](https://github.com/touensan/Codeb/releases/latest) 仍为 0.2.17 历史包，最新包请使用官网或固定分享。Android 8.0 及以上；本机环境包需要 ARM64 Android，也可选择 Termux。
+官网下载正式安装包为 [0.2.28](https://codeb.baiyun.si/downloads/codeb-0.2.28.apk)，约 4.7MB，可用同路径的 [.sha256](https://codeb.baiyun.si/downloads/codeb-0.2.28.apk.sha256) 校验，应用内检查更新同步提供升级。[GitHub 既有主程序 Release](https://github.com/touensan/Codeb/releases/latest) 仍为 0.2.17 历史包，最新包请使用官网或固定分享。Android 8.0 及以上；本机环境包需要 ARM64 Android，也可选择 Termux。
 正式包关闭调试模式和调试 API，不带 `dev` 版本后缀。
 
 为让已有白云Codeb 用户覆盖升级并保留聊天、SSH 和 API 配置，正式版沿用原安装包名
