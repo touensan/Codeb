@@ -5,9 +5,33 @@
 日常模式直接使用兼容 OpenAI 的 API；本机 Codeb 通过 Termux 在手机上运行官方 Codex，也可通过 SSH 使用服务器上的 Codex。
 原生 Android / Kotlin / Jetpack Compose，支持中文、English、日本語。
 
-[下载 0.2.17](https://codeb.baiyun.si/downloads/codeb-0.2.17.apk) · [官网](https://codeb.baiyun.si/) · [Skills 市场](https://codeb.baiyun.si/skills/) · [配置教程](https://api.baiyun.si/docs/codeb/) · [功能与限制](docs/LOCAL_CLIENT.md)
+[最新版本及历史包](https://pan.quadk.cn/s/90c82ccf7344) · [官网](https://codeb.baiyun.si/) · [Skills 市场](https://codeb.baiyun.si/skills/) · [配置教程](https://api.baiyun.si/docs/codeb/) · [功能与限制](docs/LOCAL_CLIENT.md)
 
 当前源码版本为 **0.2.17（versionCode 21）**。本机运行时的可运行检查见 `node tools/check-local-runtime.cjs`。
+
+## 固定下载与历史版本
+
+[主程序、历史版本和本机环境包](https://pan.quadk.cn/s/90c82ccf7344) · [原夸克备用地址](https://pan.quark.cn/s/90c82ccf7344)
+
+这是永久公开分享，无提取码。`pan.quadk.cn` 是用户指定的第三方分享入口，原夸克地址作为备用。分享内固定维护两个文件夹，后续版本继续追加，沿用同一分享链接：
+
+| 文件夹 | 下载内容 |
+| --- | --- |
+| CodeB 主程序（含历史版本） | 约 4.7MB 的主 APK，按文件名中的版本号选择最新版本；保留已归档历史包。 |
+| 本机环境包 | ARM64 环境 APK，约 184.4MiB（193MB），包含 Codex、Shell、Node.js、Python、Git；另有对应源码、说明和校验材料。 |
+
+只使用远程 Codex 时安装主程序即可。使用本机 Codex，可以选择本机环境包或 Termux；两种环境分别保留会话和工作空间。
+
+支持本机环境包的主程序（0.2.25 起）有两种获取方式：软件内官网/GitHub 下载后自动识别校验；从夸克或其他位置下载后，在“本机 Codeb 设置”点击“选择本地环境包”，选中环境 APK。校验后需经 Android 系统安装确认；环境没有单独操作界面。普通使用无需下载 `sources` 源码包。
+
+环境包也可直接拉取：[官网 APK](https://codeb.baiyun.si/downloads/runtime/Codeb-runtime-arm64-0.162.0-r1.apk) · [GitHub APK/清单/源码材料](https://github.com/touensan/Codeb/releases/tag/runtime-arm64-0.162.0-r1)。主程序与环境包独立更新。
+
+0.2.27 起的成品主程序优先读取可见界面树，并按元素点击、输入、滚动；支持最多 5 步有检查的操作，页面变化或动作失败会停止并报告完成数。截图只在界面树不足时按需使用；游戏或部分网页仍可能需要图片。界面信息及截图发送到用户选择的模型供应商，需先在软件中开启手机操控。
+
+普通权限只列出系统允许看到的应用包名。已授权的本机 Root 工作进程可用 `/system/bin/cmd package list packages` 或 `pm list packages` 获取实际包名；环境包本身不会授予 Root。Root 和普通权限保持实际身份，不自动提权。
+
+ADB 入口只打开开发者选项：USB 调试确认、无线调试配对由用户完成，当前没有内置 ADB 客户端或自动配对能力。[Android 官方 ADB 授权说明](https://developer.android.com/tools/adb#wireless-android11-command-line)。Root 不替代无障碍授权。
+
 
 [![Android CI](https://github.com/touensan/Codeb/actions/workflows/android.yml/badge.svg)](https://github.com/touensan/Codeb/actions/workflows/android.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
@@ -42,7 +66,7 @@
 
 ## 安装与升级
 
-当前正式安装包为 [0.2.17](https://codeb.baiyun.si/downloads/codeb-0.2.17.apk)，可用同路径的 [.sha256](https://codeb.baiyun.si/downloads/codeb-0.2.17.apk.sha256) 校验。[GitHub 下载](https://github.com/touensan/Codeb/releases/latest) 提供同一正式安装包，包含 Codeb 的更新、教程、反馈和 Skills 市场入口。Android 8.0 及以上；本机工作模式需要 ARM64 Android 和 Termux。
+网站和 GitHub 既有正式安装包为 [0.2.17](https://codeb.baiyun.si/downloads/codeb-0.2.17.apk)，可用同路径的 [.sha256](https://codeb.baiyun.si/downloads/codeb-0.2.17.apk.sha256) 校验。[GitHub 下载](https://github.com/touensan/Codeb/releases/latest) 提供同一正式安装包，包含 Codeb 的更新、教程、反馈和 Skills 市场入口。Android 8.0 及以上；本机工作模式需要 ARM64 Android 和 Termux。
 正式包关闭调试模式和调试 API，不带 `dev` 版本后缀。
 
 为让已有白云Codeb 用户覆盖升级并保留聊天、SSH 和 API 配置，正式版沿用原安装包名
