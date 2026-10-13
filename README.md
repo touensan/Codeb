@@ -9,6 +9,8 @@
 
 当前源码版本为 **0.2.17（versionCode 21）**。本机运行时的可运行检查见 `node tools/check-local-runtime.cjs`。
 
+官网下载和应用内更新已同步至 **0.2.27（versionCode 31）**，清单修订16，主包约4.7MB；环境包独立可选，最新成品功能见下方说明。公开源码和既有主程序 GitHub Release 仍为 0.2.17。
+
 ## 固定下载与历史版本
 
 [主程序、历史版本和本机环境包](https://pan.quadk.cn/s/90c82ccf7344) · [原夸克备用地址](https://pan.quark.cn/s/90c82ccf7344)
@@ -66,7 +68,7 @@ ADB 入口只打开开发者选项：USB 调试确认、无线调试配对由用
 
 ## 安装与升级
 
-网站和 GitHub 既有正式安装包为 [0.2.17](https://codeb.baiyun.si/downloads/codeb-0.2.17.apk)，可用同路径的 [.sha256](https://codeb.baiyun.si/downloads/codeb-0.2.17.apk.sha256) 校验。[GitHub 下载](https://github.com/touensan/Codeb/releases/latest) 提供同一正式安装包，包含 Codeb 的更新、教程、反馈和 Skills 市场入口。Android 8.0 及以上；本机工作模式需要 ARM64 Android 和 Termux。
+官网下载正式安装包为 [0.2.27](https://codeb.baiyun.si/downloads/codeb-0.2.27.apk)，约 4.7MB，可用同路径的 [.sha256](https://codeb.baiyun.si/downloads/codeb-0.2.27.apk.sha256) 校验，应用内检查更新同步提供升级。[GitHub 既有主程序 Release](https://github.com/touensan/Codeb/releases/latest) 仍为 0.2.17 历史包，最新包请使用官网或固定分享。Android 8.0 及以上；本机环境包需要 ARM64 Android，也可选择 Termux。
 正式包关闭调试模式和调试 API，不带 `dev` 版本后缀。
 
 为让已有白云Codeb 用户覆盖升级并保留聊天、SSH 和 API 配置，正式版沿用原安装包名
